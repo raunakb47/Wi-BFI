@@ -53,8 +53,8 @@ if __name__ == '__main__':
     bw = int(args.bw)
     MAC = args.MAC
     num_packet_to_process = int(args.num_packet_to_process)
-    saved_vmatrices = 'vmatrix/' + args.saved_vmatrices
-    saved_angles = 'bfa/' + args.saved_angles
+    saved_vmatrices = args.saved_vmatrices
+    saved_angles = args.saved_angles
 
     # Check if mu-mimo is selected for AX standard
     if mimo == "MU" and standard == "AX":
