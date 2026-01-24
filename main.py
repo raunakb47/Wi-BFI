@@ -46,7 +46,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set variables based on command-line arguments
-    file_name = 'traces/' + args.file_name
+    file_name = args.file_name
     standard = args.standard
     mimo = args.mimo
     config = args.config
