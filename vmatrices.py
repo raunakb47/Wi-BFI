@@ -223,6 +223,41 @@ def vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, config):
             v_matrix_all.append(v_matrix)
 
 
+    if config == "2x2" or config == "2x1":
+
+        const1_phi = 1 / 2 ** (phi_bit - 1)
+        const2_phi = 1 / 2 ** (phi_bit)
+        
+        # Only 1 phi angle needed for Nr=2
+        phi_11 = math.pi * (const2_phi + const1_phi * angle[:, 0])
+
+        const1_psi = 1 / 2 ** (psi_bit + 1)
+        const2_psi = 1 / 2 ** (psi_bit + 2)
+        
+        # Only 1 psi angle needed for Nr=2
+        psi_21 = math.pi * (const2_psi + const1_psi * angle[:, 1])
+
+        v_matrix = []
+        v_matrix_all = []
+        for s in range(NSUBC_VALID):
+            # build D matrices (phi) for 2x2
+            D_1 = [[cmath.exp(1j * phi_11[s]), 0],
+                   [0, 1]]
+
+            # build G matrices (psi) for 2x2
+            G_21 = [[math.cos(psi_21[s]), math.sin(psi_21[s])],
+                    [-math.sin(psi_21[s]), math.cos(psi_21[s])]]
+
+            # np.eye automatically handles the difference between 2x1 and 2x2
+            # based on the Nc_users parameter passed from main.py
+            I_matrix = np.eye(Nr, Nc_users)
+            
+            # Sequence: D1 * G21^T * I
+            V = np.matmul(np.matmul(D_1, np.transpose(G_21)), I_matrix)
+            v_matrix = np.transpose(V)
+            v_matrix_all.append(v_matrix)
+
+
     v_matrix_all = np.stack(v_matrix_all, axis=1)
     v_matrix_all = np.moveaxis(v_matrix_all, [1, 2, 0], [0, 1, 2])
     return v_matrix_all

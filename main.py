@@ -35,7 +35,7 @@ if __name__ == '__main__':
     parser.add_argument('file_name', help='File name to process')
     parser.add_argument('standard', help='which standard are you operating on, options are "AC" or "AX" ')
     parser.add_argument('mimo', help='which type of network are you forming, options are "SU" for su-mimo or "MU" for mu-mimo ')
-    parser.add_argument('config', help='which type of antenna config you have, for now, available options are 3x1 with AC and 4x2 with AX')
+    parser.add_argument('config', help='which type of antenna config you have. Options: 4x2, 4x1, 3x3, 3x2, 3x1, 2x2, 2x1')
     parser.add_argument('bw', help='bandwidth of the capture')
     parser.add_argument('MAC', help='MAC of the Target Device')
     parser.add_argument('num_packet_to_process', help='num_packet_to_process')
@@ -233,6 +233,28 @@ if __name__ == '__main__':
             psi_numbers = 2
             order_angles = ['phi_11', 'phi_21', 'psi_21', 'psi_31']
             order_bits = [phi_bit, phi_bit, psi_bit, psi_bit]
+            tot_angles_users = phi_numbers + psi_numbers
+            tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
+
+        elif config == "2x2":
+            # Set parameters for 2x2 antenna configuration
+            Nc_users = 2  # number of spatial streams
+            Nr = 2  # number of Tx antennas
+            phi_numbers = 1
+            psi_numbers = 1
+            order_angles = ['phi_11', 'psi_21']
+            order_bits = [phi_bit, psi_bit]
+            tot_angles_users = phi_numbers + psi_numbers
+            tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
+
+        elif config == "2x1":
+            # Set parameters for 2x1 antenna configuration
+            Nc_users = 1  # number of spatial streams
+            Nr = 2  # number of Tx antennas
+            phi_numbers = 1
+            psi_numbers = 1
+            order_angles = ['phi_11', 'psi_21']
+            order_bits = [phi_bit, psi_bit]
             tot_angles_users = phi_numbers + psi_numbers
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
