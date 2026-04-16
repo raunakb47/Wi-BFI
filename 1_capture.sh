@@ -3,7 +3,7 @@
 
 DURATION="15m"
 INTERFACE="wlan0"
-SAVE_DIR="./captures"
+SAVE_DIR="../bfi-workspace/captures"
 
 # Create the captures directory if it doesn't exist
 mkdir -p "$SAVE_DIR"
