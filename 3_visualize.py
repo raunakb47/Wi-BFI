@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import os
 from pathlib import Path
 
-ANALYSIS_ROOT = "./analysis"
+ANALYSIS_ROOT = "../bfi-workspace/analysis"
 
 def load_smart_rssi(file_path):
     """Handles single-antenna 'ghost' values or true diversity."""
