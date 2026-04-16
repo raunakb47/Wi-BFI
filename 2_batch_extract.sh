@@ -1,7 +1,7 @@
 #!/bin/bash
 # 2_batch_extract.sh
 
-PCAP_PATH=$(ls -t ./captures/*.pcap | head -1)
+PCAP_PATH=$(ls -t ../bfi-workspace/captures/*.pcap | head -1)
 ANALYSIS_ROOT="../bfi-workspace/analysis"
 
 if [ -z "$PCAP_PATH" ]; then echo "No PCAP found!"; exit 1; fi
