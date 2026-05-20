@@ -59,7 +59,6 @@ if __name__ == '__main__':
     # Subcarrier Mapping
     # ---------------------------------------------------------
     if standard == "AC":
-        # Set subcarrier indices based on bandwidth
         if bw == 80:
             subcarrier_idxs = np.arange(-122, 123)
             pilot_n_null = np.array([-104, -76, -40, -12, -1, 0, 1, 10, 38, 74, 102])
