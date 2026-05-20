@@ -26,46 +26,39 @@ from utils import hex2dec, flip_hex
 # Set the default value for the least significant bit (LSB)
 LSB = True
 
-# Check if the script is being run as the main program
 if __name__ == '__main__':
-    # Create a command-line argument parser
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="IEEE 802.11 Agnostic BFI Extraction Engine")
 
-    # Define command-line arguments
-    parser.add_argument('file_name', help='File name to process')
-    parser.add_argument('standard', help='which standard are you operating on, options are "AC" or "AX" ')
-    parser.add_argument('mimo', help='which type of network are you forming, options are "SU" for su-mimo or "MU" for mu-mimo ')
-    parser.add_argument('config', help='which type of antenna config you have. Options: 4x2, 4x1, 3x3, 3x2, 3x1, 2x2, 2x1')
-    parser.add_argument('bw', help='bandwidth of the capture')
-    parser.add_argument('MAC', help='MAC of the Target Device')
-    parser.add_argument('num_packet_to_process', help='num_packet_to_process')
-    parser.add_argument('saved_vmatrices', help='saved_vmatrices')
-    parser.add_argument('saved_angles', help='saved_angles')
+    # Define command-line arguments (MAC argument removed)
+    parser.add_argument('file_name', help='File name to process (PCAP)')
+    parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
+    parser.add_argument('mimo', help='Network formation: "SU" (Single User) or "MU" (Multi User)')
+    parser.add_argument('config', help='Fallback antenna config (e.g., 4x4, 4x2, 2x2)')
+    parser.add_argument('bw', help='Bandwidth of the capture (20, 40, 80, 160)')
+    parser.add_argument('num_packet_to_process', help='Maximum packets to process')
+    parser.add_argument('saved_vmatrices', help='Output numpy file for V-Matrices')
+    parser.add_argument('saved_angles', help='Output numpy file for Raw Angles')
 
-    # Parse the command-line arguments
     args = parser.parse_args()
 
-    # Set variables based on command-line arguments
     file_name = args.file_name
     standard = args.standard
     mimo = args.mimo
-    config = args.config
+    fallback_config = args.config
     bw = int(args.bw)
-    MAC = args.MAC
     num_packet_to_process = int(args.num_packet_to_process)
     saved_vmatrices = args.saved_vmatrices
     saved_angles = args.saved_angles
 
-    # Check if mu-mimo is selected for AX standard
     if mimo == "MU" and standard == "AX":
-        print("mu-mimo is not available for AX yet, we will add this feature soon")
+        print("[!] MU-MIMO is not available for AX yet. Feature pending.")
     else:
-        print("Processing")
+        print(f"[*] Processing {file_name} (Standard: {standard}, BW: {bw}MHz)")
 
-
-    # Check standard and set parameters accordingly
+    # ---------------------------------------------------------
+    # Subcarrier Mapping
+    # ---------------------------------------------------------
     if standard == "AC":
-
         # Set subcarrier indices based on bandwidth
         if bw == 80:
             subcarrier_idxs = np.arange(-122, 123)
@@ -79,12 +72,8 @@ if __name__ == '__main__':
             subcarrier_idxs = np.arange(-28, 29)
             pilot_n_null = np.array([-21, -8, 0, 6, 21])
             subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        else:
-            print("input a valid bandwidth for IEEE 802.11ac")
 
     if standard == "AX":
-
-        # Set subcarrier indices based on bandwidth
         if bw == 160:
             subcarrier_idxs = np.arange(-1012, 1013, 4)
             pilot_n_null = np.array([-512, -8, -4, 0, 4, 8, 512])
@@ -101,101 +90,114 @@ if __name__ == '__main__':
             neg_subcarriers = np.setdiff1d(np.arange(-122, 0, 2), np.arange(-118, -2, 4))
             pos_subcarriers = np.setdiff1d(np.arange(2, 124, 2), np.arange(6, 122, 4))
             subcarrier_idxs = np.concatenate((neg_subcarriers, pos_subcarriers))
-        else:
-            print("input a valid bandwidth for IEEE 802.11ac")
 
-        
-    # Read packets from the pcap file based on the selected standard
+    # ---------------------------------------------------------
+    # Agnostic Packet Filtering (No MAC defined)
+    # ---------------------------------------------------------
     if standard == "AX":
-        packets = pyshark.FileCapture(
-            input_file=file_name,
-            display_filter='wlan.he.mimo.feedback_type==SU && wlan.addr==%s' % (MAC),
-            use_json=True,
-            include_raw=True
-        )._packets_from_tshark_sync()  # pcap_dir is the directory of my pcap file
-    elif standard == "AC":
-        packets = pyshark.FileCapture(
-            input_file=file_name,
-            display_filter='wlan.vht.mimo_control.feedbacktype==%s && wlan.addr==%s' % (mimo, MAC),
-            use_json=True,
-            include_raw=True
-        )._packets_from_tshark_sync()
+        display_filter = f'wlan.he.mimo.feedback_type=={mimo}'
+    else:
+        display_filter = f'wlan.vht.mimo_control.feedbacktype=={mimo}'
 
-    # Initialize lists to store feedback angles and v-matrices
-    bfi_angles_all_packets = []
-    v_matrices_all = []
+    packets = pyshark.FileCapture(
+        input_file=file_name,
+        display_filter=display_filter,
+        use_json=True,
+        include_raw=True
+    )._packets_from_tshark_sync()
 
-    # Process each packet
+    buckets_v_matrices = {}
+    buckets_angles = {}
+
     for p in range(num_packet_to_process):
-    	# Extract raw frame data from the packet
-        packet = packets.__next__().frame_raw.value
-        print('packet___________ ' + str(p) + '\n\n\n')
+        try:
+            current_packet = packets.__next__()
+        except StopIteration:
+            break
+            
+        packet_raw = current_packet.frame_raw.value
 
-        # Extract header information from the raw frame data
-        Header_rivision_dec = hex2dec(flip_hex(packet[0:2]))
-        Header_pad_dec = hex2dec(flip_hex(packet[2:4]))
-        Header_length_dec = hex2dec(flip_hex(packet[4:8]))
+        try:
+            mac_addr = current_packet.wlan.ta
+        except AttributeError:
+            continue 
+
+        try:
+            if standard == "AX":
+                nc_idx = int(current_packet.wlan.he_mimo_control_ncidx)
+                nr_idx = int(current_packet.wlan.he_mimo_control_nridx)
+            else:
+                nc_idx = int(current_packet.wlan.vht_mimo_control_ncindex)
+                nr_idx = int(current_packet.wlan.vht_mimo_control_nridx)
+            pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
+        except AttributeError:
+            pkt_config = fallback_config
+
+        bucket_key = f"{mac_addr}_{pkt_config}"
+        
+        if bucket_key not in buckets_v_matrices:
+            buckets_v_matrices[bucket_key] = []
+            buckets_angles[bucket_key] = []
+
+        # ---------------------------------------------------------
+        # Hex Header Traversal
+        # ---------------------------------------------------------
+        Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
-        # Extract various fields from the frame
-        Frame_Control_Field_hex = packet[i:(i + 4)]
-        packet_duration = packet[(i + 4):(i + 8)]
-        packet_destination_mac = packet[(i + 8):(i + 20)]
-        packet_sender_mac = packet[(i + 20):(i + 32)]
-        packet_BSS_ID = packet[(i + 32):(i + 44)]
-        packet_sequence_number = packet[(i + 44):(i + 48)]
-        packet_HE_category = packet[(i + 48):(i + 50)]
-        packet_CQI = packet[(i + 50):(i + 52)]
-
-        # Extract specific fields for AX or AC standard
         if standard == "AX":
-            packet_mimo_control = packet[(i + 52):(i + 62)]
+            packet_mimo_control = packet_raw[(i + 52):(i + 62)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[30] 
-            packet_snr = packet[(i + 62):(i + 62 + 2*int(config[-1]))]
-            frame_check_sequence = packet[-8:]
+            packet_snr = packet_raw[(i + 62):(i + 62 + 2*int(pkt_config[-1]))]
 
         if standard == "AC":
-            packet_mimo_control = packet[(i + 52):(i + 58)]
+            packet_mimo_control = packet_raw[(i + 52):(i + 58)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[13]
-            packet_snr = packet[(i + 58):(i + 58 + 2*int(config[-1]))]
-            frame_check_sequence = packet[-8:]
+            packet_snr = packet_raw[(i + 58):(i + 58 + 2*int(pkt_config[-1]))]
 
-
-        # Set bits for angles based on mimo type
         if mimo == "SU":
             if codebook_info == "1":
                 psi_bit = 4
-                phi_bit = psi_bit + 2
             else:
                 psi_bit = 2
-                phi_bit = psi_bit + 2
+            phi_bit = psi_bit + 2
         elif mimo == "MU":
             if codebook_info == "1":
                 psi_bit = 7
-                phi_bit = psi_bit + 2
             else:
                 psi_bit = 5
-                phi_bit = psi_bit + 2
+            phi_bit = psi_bit + 2
 
+        # ---------------------------------------------------------
+        # Codebook Mathematical Definitions
+        # ---------------------------------------------------------
+        if pkt_config == "4x4" or pkt_config == "4x3":
+            Nc_users = int(pkt_config[-1])
+            Nr = 4 
+            phi_numbers = 6
+            psi_numbers = 6
+            order_angles = ['phi_11', 'phi_21', 'phi_31', 'psi_21', 'psi_31', 'psi_41', 
+                            'phi_22', 'phi_32', 'psi_32', 'psi_42', 'phi_33', 'psi_43']
+            order_bits = [phi_bit]*3 + [psi_bit]*3 + [phi_bit]*2 + [psi_bit]*2 + [phi_bit]*1 + [psi_bit]*1
+            tot_angles_users = phi_numbers + psi_numbers
+            tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
-        if config == "4x2":
-            # Set parameters for 4x2 antenna configuration
-            Nc_users = 2  # number of spatial streams
-            Nr = 4  # number of Tx antennas
+        elif pkt_config == "4x2":
+            Nc_users = 2 
+            Nr = 4 
             phi_numbers = 5
             psi_numbers = 5
-            order_angles = ['phi_11', 'phi_21', 'phi_31', 'psi_21', 'psi_31', 'psi_41', 'phi_22', 'phi_32', 'psi_32',
-                            'psi_42']
+            order_angles = ['phi_11', 'phi_21', 'phi_31', 'psi_21', 'psi_31', 'psi_41', 
+                            'phi_22', 'phi_32', 'psi_32', 'psi_42']
             order_bits = [phi_bit, phi_bit, phi_bit, psi_bit, psi_bit, psi_bit, phi_bit, phi_bit, psi_bit, psi_bit]
             tot_angles_users = phi_numbers + psi_numbers
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
-        elif config == "4x1":
-            # Set parameters for 4x1 antenna configuration
-            Nc_users = 1  # number of spatial streams
-            Nr = 4  # number of Tx antennas
+        elif pkt_config == "4x1":
+            Nc_users = 1 
+            Nr = 4 
             phi_numbers = 3
             psi_numbers = 3
             order_angles = ['phi_11', 'phi_21', 'phi_31', 'psi_21', 'psi_31', 'psi_41']
@@ -203,10 +205,9 @@ if __name__ == '__main__':
             tot_angles_users = phi_numbers + psi_numbers
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
-        elif config == "3x3":
-            # Set parameters for 3x3 antenna configuration
-            Nc_users = 3  # number of spatial streams
-            Nr = 3  # number of Tx antennas
+        elif pkt_config == "3x3" or pkt_config == "3x2":
+            Nc_users = int(pkt_config[-1]) 
+            Nr = 3 
             phi_numbers = 3
             psi_numbers = 3
             order_angles = ['phi_11', 'phi_21', 'psi_21', 'psi_31', 'phi_22', 'psi_32']
@@ -214,21 +215,9 @@ if __name__ == '__main__':
             tot_angles_users = phi_numbers + psi_numbers
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
-        elif config == "3x2":
-            # Set parameters for 3x2 antenna configuration
-            Nc_users = 2  # number of spatial streams
-            Nr = 3  # number of Tx antennas
-            phi_numbers = 3
-            psi_numbers = 3
-            order_angles = ['phi_11', 'phi_21', 'psi_21', 'psi_31', 'phi_22', 'psi_32']
-            order_bits = [phi_bit, phi_bit, psi_bit, psi_bit, phi_bit, psi_bit]
-            tot_angles_users = phi_numbers + psi_numbers
-            tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
-
-        elif config == "3x1":
-            # Set parameters for 3x1 antenna configuration
-            Nc_users = 1  # number of spatial streams
-            Nr = 3  # number of Tx antennas
+        elif pkt_config == "3x1":
+            Nc_users = 1 
+            Nr = 3 
             phi_numbers = 2
             psi_numbers = 2
             order_angles = ['phi_11', 'phi_21', 'psi_21', 'psi_31']
@@ -236,21 +225,9 @@ if __name__ == '__main__':
             tot_angles_users = phi_numbers + psi_numbers
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
-        elif config == "2x2":
-            # Set parameters for 2x2 antenna configuration
-            Nc_users = 2  # number of spatial streams
-            Nr = 2  # number of Tx antennas
-            phi_numbers = 1
-            psi_numbers = 1
-            order_angles = ['phi_11', 'psi_21']
-            order_bits = [phi_bit, psi_bit]
-            tot_angles_users = phi_numbers + psi_numbers
-            tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
-
-        elif config == "2x1":
-            # Set parameters for 2x1 antenna configuration
-            Nc_users = 1  # number of spatial streams
-            Nr = 2  # number of Tx antennas
+        elif pkt_config == "2x2" or pkt_config == "2x1":
+            Nc_users = int(pkt_config[-1]) 
+            Nr = 2 
             phi_numbers = 1
             psi_numbers = 1
             order_angles = ['phi_11', 'psi_21']
@@ -259,46 +236,33 @@ if __name__ == '__main__':
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
 
         else:
-            print("the antenna configuration that you have is not available right now, you will update other configurations soon, stay tuned")
+            continue
 
-        # Set constant for valid subcarriers
         NSUBC_VALID = len(subcarrier_idxs)
-        length_angles_users_bits = NSUBC_VALID * tot_bits_users
-        length_angles_users = math.floor(length_angles_users_bits / 8)
-
-
-        # Extract specific fields for AX or AC standard
+        
+        # ---------------------------------------------------------
+        # BFI Payload Extraction
+        # ---------------------------------------------------------
         if standard == "AX":
-            Feedback_angles = packet[(i + 62 + 2*int(config[-1])):(len(packet) - 8)]
-            Feedback_angles_splitted = np.array(wrap(Feedback_angles, 2))
-            Feedback_angles_bin = ""
+            Feedback_angles = packet_raw[(i + 62 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
         if standard == "AC":
-            #Feedback_angles = packet[(i + 60):(i + 60 + (length_angles_users * 2))]
-            Feedback_angles = packet[(i + 58 + 2*int(config[-1])):(len(packet) - 8)]
-            #bfm_report_length = packet[(i + 60 + length_angles_users * 2):(len(packet) - 8)]
-            Feedback_angles_splitted = np.array(wrap(Feedback_angles, 2))
-            Feedback_angles_bin = ""
+            Feedback_angles = packet_raw[(i + 58 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
+            
+        Feedback_angles_splitted = np.array(wrap(Feedback_angles, 2))
+        Feedback_angles_bin = ""
 
-
-
-        # Convert feedback angles to binary format
-        for i in range(0, len(Feedback_angles_splitted)):
-            bin_str = str(format(hex2dec(Feedback_angles_splitted[i]), '08b'))
+        for idx in range(0, len(Feedback_angles_splitted)):
+            bin_str = str(format(hex2dec(Feedback_angles_splitted[idx]), '08b'))
             if LSB:
                 bin_str = bin_str[::-1]
             Feedback_angles_bin += bin_str
 
-        # Split the binary feedback angles into chunks for each subcarrier
-        # for j in range(0, len(subcarrier_idxs)):
-        #     Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:(tot_bits_users * NSUBC_VALID)], tot_bits_users))
-
         Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:(tot_bits_users * NSUBC_VALID)], tot_bits_users))
 
-        # Calculate angles and v-matrices and store them in lists
         angle = bfi_angles(Feed_back_angles_bin_chunk, LSB, NSUBC_VALID, order_bits)
-        v_matrices_all.append(vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, config))
-        bfi_angles_all_packets.append(bfi_angles(Feed_back_angles_bin_chunk, LSB, NSUBC_VALID, order_bits))
+        
+        buckets_v_matrices[bucket_key].append(vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config))
+        buckets_angles[bucket_key].append(angle)
 
-    # Save v-matrices and angles to files
-    np.save(saved_vmatrices, v_matrices_all)
-    np.save(saved_angles, bfi_angles_all_packets)
+    np.save(saved_vmatrices, buckets_v_matrices)
+    np.save(saved_angles, buckets_angles)
