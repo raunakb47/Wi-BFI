@@ -1,43 +1,14 @@
 # Wi-BFI
 
-This is the implementation of the paper [Wi-BFI: Extracting the IEEE 802.11 Beamforming Feedback Information from Commercial Wi-Fi Devices](https://dl.acm.org/doi/10.1145/3615453.3616514).
+This is a fork from the implementation of the paper [Wi-BFI: Extracting the IEEE 802.11 Beamforming Feedback Information from Commercial Wi-Fi Devices](https://dl.acm.org/doi/10.1145/3615453.3616514).
 
 <br/>
 
 ### Wi-BFI is the first open-source tool for retrieving Wi-Fi beamforming feedback angles (BFAs) and reconstructing beamforming feedback information (BFI) in the form of Vmatrices 
 <br/>
 
-<p align="center">
-<img src="Images/Wi-BFI.png" width="700" height="700"
-     alt="Markdown Monster icon"
-     style="float: center;" />
-</p>
 
-If you find the project useful and you use this code, please cite our paper:
-<br/>
-
-```
-@inproceedings{10.1145/3615453.3616514,
-author = {Haque, Khandaker Foysal and Meneghello, Francesca and Restuccia, Francesco},
-title = {Wi-BFI: Extracting the IEEE 802.11 Beamforming Feedback Information from Commercial Wi-Fi Devices},
-year = {2023},
-isbn = {9798400703409},
-publisher = {Association for Computing Machinery},
-address = {New York, NY, USA},
-url = {https://doi.org/10.1145/3615453.3616514},
-doi = {10.1145/3615453.3616514},
-pages = {104–111},
-numpages = {8},
-keywords = {compressed beamforming feedback, beamforming, Wi-Fi, multiple-input multiple-output (MIMO)},
-location = {Madrid, Spain},
-series = {WiNTECH '23}
-}
-
-```
-<br/>
-<br/>
-
-First, clone the repository with ``` git@github.com:kfoysalhaque/Wi-BFI.git ``` and move into the directory with ``` cd  Wi-BFI ```
+First, clone the repository with ``` git@github.com:raunakb47/Wi-BFI.git ``` and move into the directory with ``` cd  Wi-BFI ```
 
 Then, Setup the conda environment with ``` conda env create -f wi-bfi.yml ```
 
