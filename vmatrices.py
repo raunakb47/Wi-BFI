@@ -1,6 +1,4 @@
 """
-    Copyright (C) 2023 Khandaker Foysal Haque
-    contact: haque.k@northeastern.edu
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
@@ -20,7 +18,15 @@ import cmath
 def vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, config):
     """
     Reconstructs IEEE 802.11 V-Matrices via Givens Rotations.
-    Now optimized to support up to 4x4 spatial array architectures.
+    
+    Scientific Note on Nomenclature:
+    In the IEEE 802.11 BFI standard, the V-Matrix dimensions correspond to:
+      - Nr (Rows) = Transmitter Antennas (Nt of the AP)
+      - Nc (Cols) = Spatial Streams (Nr of the Client)
+      
+    This function processes the dequantized angles and returns a pristine 
+    spatial tensor of shape: (Subcarriers, Nt, Spatial_Streams) ready for 
+    VSS-LMS temporal sanitization and ESPRIT AoD extraction.
     """
 
     # -------------------------------------------------------------------------
@@ -103,13 +109,14 @@ def vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, config):
             # Auto-sizes to 4x4 or 4x3 based on Nc_users parameter
             I_matrix = np.eye(Nr, Nc_users)
             
-            # Full 3-Layer Codebook Sequence
+            # Full 3-Layer Codebook Sequence execution
             L1 = np.matmul(np.matmul(np.matmul(D_1, np.transpose(G_21)), np.transpose(G_31)), np.transpose(G_41))
             L2 = np.matmul(np.matmul(D_2, np.transpose(G_32)), np.transpose(G_42))
             L3 = np.matmul(D_3, np.transpose(G_43))
             
             V = np.matmul(np.matmul(np.matmul(L1, L2), L3), I_matrix)
             
+            # Transpose to align with the array compilation logic
             v_matrix_all.append(np.transpose(V))
 
     # -------------------------------------------------------------------------
@@ -341,8 +348,15 @@ def vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, config):
         # Failsafe for unhandled edge-cases
         return []
 
-    # Format into standardized spatial tensor
+    # -------------------------------------------------------------------------
+    # Output Tensor Formatting
+    # -------------------------------------------------------------------------
+    # 1. np.stack yields shape: (Nc_users, NSUBC_VALID, Nr)
     v_matrix_all = np.stack(v_matrix_all, axis=1)
+    
+    # 2. np.moveaxis repositions the dimensions to output standard format:
+    #    (Subcarriers, Transmit_Antennas, Spatial_Streams) -> (NSUBC_VALID, Nr, Nc)
+    #    This precisely matches the (Subcarriers, Nt, Nr) indexing downstream.
     v_matrix_all = np.moveaxis(v_matrix_all, [1, 2, 0], [0, 1, 2])
     
     return v_matrix_all

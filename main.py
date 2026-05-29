@@ -1,6 +1,4 @@
 """
-    Copyright (C) 2023 Khandaker Foysal Haque
-    contact: haque.k@northeastern.edu
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
@@ -29,7 +27,7 @@ LSB = True
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="IEEE 802.11 Agnostic BFI Extraction Engine")
 
-    # Define command-line arguments (MAC argument removed)
+    # Define command-line arguments
     parser.add_argument('file_name', help='File name to process (PCAP)')
     parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
     parser.add_argument('mimo', help='Network formation: "SU" (Single User) or "MU" (Multi User)')
@@ -118,6 +116,8 @@ if __name__ == '__main__':
 
         try:
             mac_addr = current_packet.wlan.ta
+            # Critical Requirement for Temporal Sanitization
+            timestamp = float(current_packet.sniff_timestamp) 
         except AttributeError:
             continue 
 
@@ -170,7 +170,7 @@ if __name__ == '__main__':
             phi_bit = psi_bit + 2
 
         # ---------------------------------------------------------
-        # Codebook Mathematical Definitions
+        # Definitions
         # ---------------------------------------------------------
         if pkt_config == "4x4" or pkt_config == "4x3":
             Nc_users = int(pkt_config[-1])
@@ -260,8 +260,15 @@ if __name__ == '__main__':
 
         angle = bfi_angles(Feed_back_angles_bin_chunk, LSB, NSUBC_VALID, order_bits)
         
-        buckets_v_matrices[bucket_key].append(vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config))
-        buckets_angles[bucket_key].append(angle)
+        # Reconstruct the complex Matrix
+        v_matrix = vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config)
+        
+        # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
+        buckets_v_matrices[bucket_key].append((timestamp, v_matrix))
+        
+        # Merge the absolute timestamp with the raw angles for external debug/logging
+        buckets_angles[bucket_key].append((timestamp, angle))
 
     np.save(saved_vmatrices, buckets_v_matrices)
     np.save(saved_angles, buckets_angles)
+    print(f"[*] Extraction complete. Saved to {saved_vmatrices}")
