@@ -11,7 +11,6 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-# Import necessary libraries
 import pyshark
 import numpy as np
 import math
@@ -26,11 +25,9 @@ LSB = True
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="IEEE 802.11 Agnostic BFI Extraction Engine")
-
-    # Define command-line arguments
     parser.add_argument('file_name', help='File name to process (PCAP)')
     parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
-    parser.add_argument('mimo', help='Network formation: "SU" (Single User) or "MU" (Multi User)')
+    parser.add_argument('mimo', help='Network formation: "SU" or "MU"')
     parser.add_argument('config', help='Fallback antenna config (e.g., 4x4, 4x2, 2x2)')
     parser.add_argument('bw', help='Bandwidth of the capture (20, 40, 80, 160)')
     parser.add_argument('num_packet_to_process', help='Maximum packets to process')
@@ -88,9 +85,6 @@ if __name__ == '__main__':
             pos_subcarriers = np.setdiff1d(np.arange(2, 124, 2), np.arange(6, 122, 4))
             subcarrier_idxs = np.concatenate((neg_subcarriers, pos_subcarriers))
 
-    # ---------------------------------------------------------
-    # Agnostic Packet Filtering (No MAC defined)
-    # ---------------------------------------------------------
     if standard == "AX":
         display_filter = f'wlan.he.mimo.feedback_type=={mimo}'
     else:
@@ -115,9 +109,15 @@ if __name__ == '__main__':
         packet_raw = current_packet.frame_raw.value
 
         try:
-            mac_addr = current_packet.wlan.ta
-            # Critical Requirement for Temporal Sanitization
+            mac_addr_ta = current_packet.wlan.ta
+            mac_addr_ra = current_packet.wlan.ra # Receiver address
             timestamp = float(current_packet.sniff_timestamp) 
+            
+            #  Extract Monitor Card RSSI for Ray-Circle Intersection
+            try:
+                rssi = float(current_packet.wlan_radio.signal_dbm)
+            except AttributeError:
+                rssi = -65.0 
         except AttributeError:
             continue 
 
@@ -132,15 +132,15 @@ if __name__ == '__main__':
         except AttributeError:
             pkt_config = fallback_config
 
-        bucket_key = f"{mac_addr}_{pkt_config}"
+        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}"
         
         if bucket_key not in buckets_v_matrices:
             buckets_v_matrices[bucket_key] = []
             buckets_angles[bucket_key] = []
 
-        # ---------------------------------------------------------
+        # ---------------------------
         # Hex Header Traversal
-        # ---------------------------------------------------------
+        # ---------------------------
         Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
@@ -169,9 +169,10 @@ if __name__ == '__main__':
                 psi_bit = 5
             phi_bit = psi_bit + 2
 
-        # ---------------------------------------------------------
+        # -------------------------
         # Definitions
-        # ---------------------------------------------------------
+        # -------------------------
+
         if pkt_config == "4x4" or pkt_config == "4x3":
             Nc_users = int(pkt_config[-1])
             Nr = 4 
@@ -233,15 +234,14 @@ if __name__ == '__main__':
             order_bits = [phi_bit, psi_bit]
             tot_angles_users = phi_numbers + psi_numbers
             tot_bits_users = phi_numbers * phi_bit + psi_numbers * psi_bit
-
         else:
             continue
 
         NSUBC_VALID = len(subcarrier_idxs)
-        
-        # ---------------------------------------------------------
+
+        # ----------------------------
         # BFI Payload Extraction
-        # ---------------------------------------------------------
+        # ----------------------------
         if standard == "AX":
             Feedback_angles = packet_raw[(i + 62 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
         if standard == "AC":
@@ -259,14 +259,14 @@ if __name__ == '__main__':
         Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:(tot_bits_users * NSUBC_VALID)], tot_bits_users))
 
         angle = bfi_angles(Feed_back_angles_bin_chunk, LSB, NSUBC_VALID, order_bits)
-        
-        # Reconstruct the complex Matrix
+
+        # Reconstruct the  V-Matrix
         v_matrix = vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config)
         
+        # Saving timestamp, v_matrix, AND rssi together
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append((timestamp, v_matrix))
-        
-        # Merge the absolute timestamp with the raw angles for external debug/logging
+        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi))
+        # Merge the absolute timestamp with the raw angles for logging
         buckets_angles[bucket_key].append((timestamp, angle))
 
     np.save(saved_vmatrices, buckets_v_matrices)
