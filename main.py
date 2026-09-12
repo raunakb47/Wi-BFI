@@ -28,7 +28,7 @@ if __name__ == '__main__':
     parser.add_argument('file_name', help='File name to process (PCAP)')
     parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
     parser.add_argument('mimo', help='Network formation: "SU" or "MU"')
-    parser.add_argument('config', help='Fallback antenna config (e.g., 4x4, 4x2, 2x2)')
+    parser.add_argument('config', help='Unused; antenna config is decoded per packet from MIMO Control. Kept for CLI compatibility.')
     parser.add_argument('bw', help='Bandwidth of the capture (20, 40, 80, 160)')
     parser.add_argument('num_packet_to_process', help='Maximum packets to process')
     parser.add_argument('saved_vmatrices', help='Output numpy file for V-Matrices')
@@ -39,7 +39,9 @@ if __name__ == '__main__':
     file_name = args.file_name
     standard = args.standard
     mimo = args.mimo
-    fallback_config = args.config
+    # Retained so the positional CLI signature (and 2_Stage2_Extraction.sh's
+    # call) stays valid; per-packet decoding replaced its former use.
+    _unused_config_arg = args.config
     bw = int(args.bw)
     num_packet_to_process = int(args.num_packet_to_process)
     saved_vmatrices = args.saved_vmatrices
@@ -121,39 +123,46 @@ if __name__ == '__main__':
         except AttributeError:
             continue 
 
-        try:
-            if standard == "AX":
-                nc_idx = int(current_packet.wlan.he_mimo_control_ncidx)
-                nr_idx = int(current_packet.wlan.he_mimo_control_nridx)
-            else:
-                nc_idx = int(current_packet.wlan.vht_mimo_control_ncindex)
-                nr_idx = int(current_packet.wlan.vht_mimo_control_nridx)
-            pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
-        except AttributeError:
-            pkt_config = fallback_config
-
-        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}"
-        
-        if bucket_key not in buckets_v_matrices:
-            buckets_v_matrices[bucket_key] = []
-            buckets_angles[bucket_key] = []
-
         # ---------------------------
         # Hex Header Traversal
         # ---------------------------
         Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
+        # Nc/Nr, codebook and SNR all live in the MIMO Control field, decoded
+        # here from the raw bytes rather than from the dissector's field tree.
+        # The tree path differs between tshark versions and sits on the
+        # wlan.mgt layer (not wlan), so attribute lookups against wlan silently
+        # raised AttributeError and every packet fell back to fallback_config.
+        # That mislabelled the bucket AND selected the wrong Givens codebook in
+        # vmatrices(), so the reconstructed V-matrices were wrong, not just
+        # tagged wrong. flip_hex reverses byte order, so binary index k holds
+        # spec bit B(width-1-k): Nc Index is B0-B2, Nr Index B3-B5.
         if standard == "AX":
             packet_mimo_control = packet_raw[(i + 52):(i + 62)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
-            codebook_info = packet_mimo_control_binary[30] 
-            packet_snr = packet_raw[(i + 62):(i + 62 + 2*int(pkt_config[-1]))]
+            codebook_info = packet_mimo_control_binary[30]
+            nc_idx = int(packet_mimo_control_binary[37:40], 2)
+            nr_idx = int(packet_mimo_control_binary[34:37], 2)
 
         if standard == "AC":
             packet_mimo_control = packet_raw[(i + 52):(i + 58)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[13]
+            nc_idx = int(packet_mimo_control_binary[21:24], 2)
+            nr_idx = int(packet_mimo_control_binary[18:21], 2)
+
+        pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
+
+        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}"
+
+        if bucket_key not in buckets_v_matrices:
+            buckets_v_matrices[bucket_key] = []
+            buckets_angles[bucket_key] = []
+
+        if standard == "AX":
+            packet_snr = packet_raw[(i + 62):(i + 62 + 2*int(pkt_config[-1]))]
+        if standard == "AC":
             packet_snr = packet_raw[(i + 58):(i + 58 + 2*int(pkt_config[-1]))]
 
         if mimo == "SU":
