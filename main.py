@@ -39,8 +39,7 @@ if __name__ == '__main__':
     file_name = args.file_name
     standard = args.standard
     mimo = args.mimo
-    # Retained so the positional CLI signature (and 2_Stage2_Extraction.sh's
-    # call) stays valid; per-packet decoding replaced its former use.
+    # Retained so the positional CLI signature stays valid for callers.
     _unused_config_arg = args.config
     bw = int(args.bw)
     num_packet_to_process = int(args.num_packet_to_process)
@@ -130,14 +129,12 @@ if __name__ == '__main__':
         i = Header_length_dec * 2
 
         # Nc/Nr, codebook and SNR all live in the MIMO Control field, decoded
-        # here from the raw bytes rather than from the dissector's field tree.
-        # The tree path differs between tshark versions and sits on the
-        # wlan.mgt layer (not wlan), so attribute lookups against wlan silently
-        # raised AttributeError and every packet fell back to fallback_config.
-        # That mislabelled the bucket AND selected the wrong Givens codebook in
-        # vmatrices(), so the reconstructed V-matrices were wrong, not just
-        # tagged wrong. flip_hex reverses byte order, so binary index k holds
-        # spec bit B(width-1-k): Nc Index is B0-B2, Nr Index B3-B5.
+        # from raw bytes rather than the dissector field tree: those fields sit
+        # on the wlan.mgt layer under Fixed parameters, and the path differs
+        # between tshark versions. pkt_config selects the Givens codebook in
+        # vmatrices(), so getting it wrong corrupts the V-matrices rather than
+        # only mislabelling the bucket. flip_hex reverses byte order, so binary
+        # index k holds spec bit B(width-1-k): Nc Index is B0-B2, Nr B3-B5.
         if standard == "AX":
             packet_mimo_control = packet_raw[(i + 52):(i + 62)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
