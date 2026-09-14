@@ -89,10 +89,7 @@ if __name__ == '__main__':
     saved_vmatrices = args.saved_vmatrices
     saved_angles = args.saved_angles
 
-    if mimo == "MU" and standard == "AX":
-        print("[!] MU-MIMO is not available for AX yet. Feature pending.")
-    else:
-        print(f"[*] Processing {file_name} (Standard: {standard})")
+    print(f"[*] Processing {file_name} (Standard: {standard}, {mimo})")
 
     if standard == "AX":
         display_filter = f'wlan.he.mimo.feedback_type=={mimo}'
@@ -156,6 +153,9 @@ if __name__ == '__main__':
             nc_idx = int(packet_mimo_control_binary[37:40], 2)
             nr_idx = int(packet_mimo_control_binary[34:37], 2)
             bw_idx = int(packet_mimo_control_binary[32:34], 2)
+            # HE Grouping is one bit and selects Ng=4 or Ng=16; there is no
+            # ungrouped option in HE.
+            grouping_idx = int(packet_mimo_control_binary[31], 2)
 
         if standard == "AC":
             packet_mimo_control = packet_raw[(i + 52):(i + 58)]
@@ -164,8 +164,20 @@ if __name__ == '__main__':
             nc_idx = int(packet_mimo_control_binary[21:24], 2)
             nr_idx = int(packet_mimo_control_binary[18:21], 2)
             bw_idx = int(packet_mimo_control_binary[16:18], 2)
+            # VHT Grouping is two bits, B8-B9: Ng = 1, 2 or 4 (value 3 reserved).
+            grouping_idx = int(packet_mimo_control_binary[14:16], 2)
 
         pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
+
+        # subcarrier_indices() holds one set per width: Ng=1 for VHT and Ng=4
+        # for HE, the defaults both standards use. A frame that groups more
+        # coarsely reports fewer subcarriers, so decoding it against these sets
+        # would silently read the wrong number of angles.
+        if grouping_idx != 0:
+            print(f"[!] skipping packet {p}: subcarrier grouping index {grouping_idx} "
+                  f"is not supported ({standard} sets below assume the finest grouping)",
+                  file=sys.stderr)
+            continue
 
         pkt_bw = BW_FROM_INDEX[bw_idx]
         subcarrier_idxs = subcarrier_indices(standard, pkt_bw)
@@ -188,6 +200,11 @@ if __name__ == '__main__':
         if standard == "AC":
             packet_snr = packet_raw[(i + 58):(i + 58 + 2*(nc_idx + 1))]
 
+        # Givens angle quantisation, from the Codebook Information subfield.
+        # The SU and MU pairs are the same in VHT and HE: SU gives (psi, phi) of
+        # (2, 4) or (4, 6), MU gives (5, 7) or (7, 9). MU feedback is quantised
+        # more finely because the beamformer nulls other users with it, so an
+        # angle error costs inter-user interference rather than array gain.
         if mimo == "SU":
             if codebook_info == "1":
                 psi_bit = 4
@@ -274,6 +291,11 @@ if __name__ == '__main__':
         # ----------------------------
         # BFI Payload Extraction
         # ----------------------------
+        # An MU report carries a MU Exclusive Beamforming Report after the
+        # feedback matrices, holding a 4-bit Delta SNR per subcarrier per
+        # space-time stream. It is not read here; prefix-slicing the angles
+        # below stops before it, so its presence changes nothing.
+        #
         # Read to the end of the frame. The angle payload is prefix-sliced to
         # tot_bits_users * NSUBC_VALID bits below, so a trailing FCS is ignored
         # either way; trimming four bytes unconditionally instead discards real
