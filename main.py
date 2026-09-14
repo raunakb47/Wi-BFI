@@ -11,6 +11,8 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import sys
+
 import pyshark
 import numpy as np
 import math
@@ -23,13 +25,53 @@ from utils import hex2dec, flip_hex
 # Set the default value for the least significant bit (LSB)
 LSB = True
 
+# Channel Width subfield of the MIMO Control field, B6-B7 in both standards.
+BW_FROM_INDEX = {0: 20, 1: 40, 2: 80, 3: 160}
+
+
+def subcarrier_indices(standard, bw):
+    """
+    Subcarrier indices carrying a compressed beamforming feedback matrix, for one
+    channel width. Returns None for a width the standard in question does not define.
+
+    The 11ax sets step by 4 because HE feedback is always grouped (Ng is 4 or 16,
+    there is no ungrouped option); the step-4 sets below are the Ng=4 case.
+    """
+    if standard == "AC":
+        if bw == 80:
+            return np.setdiff1d(np.arange(-122, 123),
+                                np.array([-104, -76, -40, -12, -1, 0, 1, 10, 38, 74, 102]))
+        if bw == 40:
+            return np.setdiff1d(np.arange(-58, 59),
+                                np.array([-54, -26, -12, -1, 0, 1, 10, 24, 52]))
+        if bw == 20:
+            return np.setdiff1d(np.arange(-28, 29), np.array([-21, -8, 0, 6, 21]))
+        return None
+
+    if standard == "AX":
+        if bw == 160:
+            return np.setdiff1d(np.arange(-1012, 1013, 4),
+                                np.array([-512, -8, -4, 0, 4, 8, 512]))
+        if bw == 80:
+            return np.setdiff1d(np.arange(-500, 504, 4), np.array([0]))
+        if bw == 40:
+            return np.setdiff1d(np.arange(-244, 248, 4), np.array([0]))
+        if bw == 20:
+            neg = np.setdiff1d(np.arange(-122, 0, 2), np.arange(-118, -2, 4))
+            pos = np.setdiff1d(np.arange(2, 124, 2), np.arange(6, 122, 4))
+            return np.concatenate((neg, pos))
+        return None
+
+    return None
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="IEEE 802.11 Agnostic BFI Extraction Engine")
     parser.add_argument('file_name', help='File name to process (PCAP)')
     parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
     parser.add_argument('mimo', help='Network formation: "SU" or "MU"')
     parser.add_argument('config', help='Unused; antenna config is decoded per packet from MIMO Control. Kept for CLI compatibility.')
-    parser.add_argument('bw', help='Bandwidth of the capture (20, 40, 80, 160)')
+    parser.add_argument('bw', help='Unused; channel width is decoded per packet from MIMO Control. Kept for CLI compatibility.')
     parser.add_argument('num_packet_to_process', help='Maximum packets to process')
     parser.add_argument('saved_vmatrices', help='Output numpy file for V-Matrices')
     parser.add_argument('saved_angles', help='Output numpy file for Raw Angles')
@@ -41,7 +83,8 @@ if __name__ == '__main__':
     mimo = args.mimo
     # Retained so the positional CLI signature stays valid for callers.
     _unused_config_arg = args.config
-    bw = int(args.bw)
+    # Retained so the positional CLI signature stays valid for callers.
+    _unused_bw_arg = args.bw
     num_packet_to_process = int(args.num_packet_to_process)
     saved_vmatrices = args.saved_vmatrices
     saved_angles = args.saved_angles
@@ -49,42 +92,7 @@ if __name__ == '__main__':
     if mimo == "MU" and standard == "AX":
         print("[!] MU-MIMO is not available for AX yet. Feature pending.")
     else:
-        print(f"[*] Processing {file_name} (Standard: {standard}, BW: {bw}MHz)")
-
-    # ---------------------------------------------------------
-    # Subcarrier Mapping
-    # ---------------------------------------------------------
-    if standard == "AC":
-        if bw == 80:
-            subcarrier_idxs = np.arange(-122, 123)
-            pilot_n_null = np.array([-104, -76, -40, -12, -1, 0, 1, 10, 38, 74, 102])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 40:
-            subcarrier_idxs = np.arange(-58, 59)
-            pilot_n_null = np.array([-54, -26, -12, -1, 0, 1, 10, 24, 52])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 20:
-            subcarrier_idxs = np.arange(-28, 29)
-            pilot_n_null = np.array([-21, -8, 0, 6, 21])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-
-    if standard == "AX":
-        if bw == 160:
-            subcarrier_idxs = np.arange(-1012, 1013, 4)
-            pilot_n_null = np.array([-512, -8, -4, 0, 4, 8, 512])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 80:
-            subcarrier_idxs = np.arange(-500, 504, 4)
-            pilot_n_null = np.array([0])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 40:
-            subcarrier_idxs = np.arange(-244, 248, 4)
-            pilot_n_null = np.array([0])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 20:
-            neg_subcarriers = np.setdiff1d(np.arange(-122, 0, 2), np.arange(-118, -2, 4))
-            pos_subcarriers = np.setdiff1d(np.arange(2, 124, 2), np.arange(6, 122, 4))
-            subcarrier_idxs = np.concatenate((neg_subcarriers, pos_subcarriers))
+        print(f"[*] Processing {file_name} (Standard: {standard})")
 
     if standard == "AX":
         display_filter = f'wlan.he.mimo.feedback_type=={mimo}'
@@ -128,19 +136,26 @@ if __name__ == '__main__':
         Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
-        # Nc/Nr, codebook and SNR all live in the MIMO Control field, decoded
-        # from raw bytes rather than the dissector field tree: those fields sit
-        # on the wlan.mgt layer under Fixed parameters, and the path differs
-        # between tshark versions. pkt_config selects the Givens codebook in
-        # vmatrices(), so getting it wrong corrupts the V-matrices rather than
+        # Nc/Nr, channel width, codebook and SNR all live in the MIMO Control
+        # field, decoded from raw bytes rather than the dissector field tree:
+        # those fields sit on the wlan.mgt layer under Fixed parameters, and the
+        # path differs between tshark versions. pkt_config selects the Givens
+        # codebook in vmatrices() and the channel width sets the subcarrier
+        # count, so getting either wrong corrupts the V-matrices rather than
         # only mislabelling the bucket. flip_hex reverses byte order, so binary
-        # index k holds spec bit B(width-1-k): Nc Index is B0-B2, Nr B3-B5.
+        # index k holds spec bit B(width-1-k): Nc Index is B0-B2, Nr B3-B5 and
+        # channel width B6-B7 in both the VHT (3-byte) and HE (5-byte) fields.
+        #
+        # Channel width is read per packet, not from the CLI: a capture may hold
+        # frames of more than one width, and sizing every frame from one CLI
+        # value slices the wrong number of subcarriers out of the odd one.
         if standard == "AX":
             packet_mimo_control = packet_raw[(i + 52):(i + 62)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[30]
             nc_idx = int(packet_mimo_control_binary[37:40], 2)
             nr_idx = int(packet_mimo_control_binary[34:37], 2)
+            bw_idx = int(packet_mimo_control_binary[32:34], 2)
 
         if standard == "AC":
             packet_mimo_control = packet_raw[(i + 52):(i + 58)]
@@ -148,19 +163,30 @@ if __name__ == '__main__':
             codebook_info = packet_mimo_control_binary[13]
             nc_idx = int(packet_mimo_control_binary[21:24], 2)
             nr_idx = int(packet_mimo_control_binary[18:21], 2)
+            bw_idx = int(packet_mimo_control_binary[16:18], 2)
 
         pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
 
-        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}"
+        pkt_bw = BW_FROM_INDEX[bw_idx]
+        subcarrier_idxs = subcarrier_indices(standard, pkt_bw)
+        if subcarrier_idxs is None:
+            print(f"[!] skipping packet {p}: {pkt_bw} MHz is not defined for {standard}", file=sys.stderr)
+            continue
+
+        # Channel width belongs in the key: a bucket holds one stack of
+        # V-matrices and their shape is (NSUBC_VALID, Nr, Nc), so mixing widths
+        # under one key produces a ragged stack. '@' keeps the key at three
+        # '_'-separated fields and leaves "{Nr}x{Nc}" parseable by consumers.
+        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}@{pkt_bw}"
 
         if bucket_key not in buckets_v_matrices:
             buckets_v_matrices[bucket_key] = []
             buckets_angles[bucket_key] = []
 
         if standard == "AX":
-            packet_snr = packet_raw[(i + 62):(i + 62 + 2*int(pkt_config[-1]))]
+            packet_snr = packet_raw[(i + 62):(i + 62 + 2*(nc_idx + 1))]
         if standard == "AC":
-            packet_snr = packet_raw[(i + 58):(i + 58 + 2*int(pkt_config[-1]))]
+            packet_snr = packet_raw[(i + 58):(i + 58 + 2*(nc_idx + 1))]
 
         if mimo == "SU":
             if codebook_info == "1":
@@ -248,10 +274,15 @@ if __name__ == '__main__':
         # ----------------------------
         # BFI Payload Extraction
         # ----------------------------
+        # Read to the end of the frame. The angle payload is prefix-sliced to
+        # tot_bits_users * NSUBC_VALID bits below, so a trailing FCS is ignored
+        # either way; trimming four bytes unconditionally instead discards real
+        # feedback on the captures whose radiotap reports no FCS at the end, and
+        # those are common (radiotap.flags.fcs is False on several adapters).
         if standard == "AX":
-            Feedback_angles = packet_raw[(i + 62 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
+            Feedback_angles = packet_raw[(i + 62 + 2*(nc_idx + 1)):]
         if standard == "AC":
-            Feedback_angles = packet_raw[(i + 58 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
+            Feedback_angles = packet_raw[(i + 58 + 2*(nc_idx + 1)):]
             
         Feedback_angles_splitted = np.array(wrap(Feedback_angles, 2))
         Feedback_angles_bin = ""
@@ -262,7 +293,16 @@ if __name__ == '__main__':
                 bin_str = bin_str[::-1]
             Feedback_angles_bin += bin_str
 
-        Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:(tot_bits_users * NSUBC_VALID)], tot_bits_users))
+        # A frame carrying fewer angle bits than the configuration calls for is
+        # reported and skipped; without this the short read surfaces as an
+        # empty binary string inside bfi_angles() and ends the whole run.
+        required_bits = tot_bits_users * NSUBC_VALID
+        if len(Feedback_angles_bin) < required_bits:
+            print(f"[!] skipping packet {p}: {pkt_config} at {pkt_bw} MHz needs {required_bits} "
+                  f"angle bits, frame carries {len(Feedback_angles_bin)}", file=sys.stderr)
+            continue
+
+        Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:required_bits], tot_bits_users))
 
         angle = bfi_angles(Feed_back_angles_bin_chunk, LSB, NSUBC_VALID, order_bits)
 
