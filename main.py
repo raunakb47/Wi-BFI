@@ -13,7 +13,6 @@
 
 import sys
 
-import pyshark
 import numpy as np
 import math
 from textwrap import wrap
@@ -21,6 +20,7 @@ import argparse
 from vmatrices import vmatrices
 from bfi_angles import bfi_angles
 from utils import hex2dec, flip_hex
+from capture_reader import beamforming_reports
 
 # Set the default value for the least significant bit (LSB)
 LSB = True
@@ -68,7 +68,7 @@ def subcarrier_indices(standard, bw):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="IEEE 802.11 Agnostic BFI Extraction Engine")
     parser.add_argument('file_name', help='File name to process (PCAP)')
-    parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
+    parser.add_argument('standard', help='Unused; the standard is decoded per packet from the Action Category. Kept for CLI compatibility.')
     parser.add_argument('mimo', help='Network formation: "SU" or "MU"')
     parser.add_argument('config', help='Unused; antenna config is decoded per packet from MIMO Control. Kept for CLI compatibility.')
     parser.add_argument('bw', help='Unused; channel width is decoded per packet from MIMO Control. Kept for CLI compatibility.')
@@ -79,7 +79,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     file_name = args.file_name
-    standard = args.standard
+    # Retained so the positional CLI signature stays valid for callers.
+    _unused_standard_arg = args.standard
     mimo = args.mimo
     # Retained so the positional CLI signature stays valid for callers.
     _unused_config_arg = args.config
@@ -89,43 +90,34 @@ if __name__ == '__main__':
     saved_vmatrices = args.saved_vmatrices
     saved_angles = args.saved_angles
 
-    print(f"[*] Processing {file_name} (Standard: {standard}, {mimo})")
+    print(f"[*] Processing {file_name} ({mimo} feedback; standard read per packet)")
 
-    if standard == "AX":
-        display_filter = f'wlan.he.mimo.feedback_type=={mimo}'
-    else:
-        display_filter = f'wlan.vht.mimo_control.feedbacktype=={mimo}'
-
-    packets = pyshark.FileCapture(
-        input_file=file_name,
-        display_filter=display_filter,
-        use_json=True,
-        include_raw=True
-    )._packets_from_tshark_sync()
-
+    # Frames come from capture_reader rather than a tshark subprocess: every field
+    # below sits at a fixed offset in the radiotap or 802.11 header, so dissecting
+    # the frame to reach it buys nothing. The reader selects on the Action Category,
+    # which also yields the standard per frame, so one capture may hold both VHT and
+    # HE feedback and both decode in the same pass.
     buckets_v_matrices = {}
     buckets_angles = {}
 
-    for p in range(num_packet_to_process):
-        try:
-            current_packet = packets.__next__()
-        except StopIteration:
+    for p, record in enumerate(beamforming_reports(file_name, mimo)):
+        if p >= num_packet_to_process:
             break
-            
-        packet_raw = current_packet.frame_raw.value
 
-        try:
-            mac_addr_ta = current_packet.wlan.ta
-            mac_addr_ra = current_packet.wlan.ra # Receiver address
-            timestamp = float(current_packet.sniff_timestamp) 
-            
-            #  Extract Monitor Card RSSI for Ray-Circle Intersection
-            try:
-                rssi = float(current_packet.wlan_radio.signal_dbm)
-            except AttributeError:
-                rssi = -65.0 
-        except AttributeError:
-            continue 
+        packet_raw = record["raw"]
+        standard = record["standard"]
+        mac_addr_ta = record["transmitter"]
+        mac_addr_ra = record["receiver"]
+        timestamp = record["timestamp"]
+
+        # A multi-chain adapter reports one chain-agnostic signal value followed by
+        # one per chain. The first is the figure for the frame as received; taking
+        # the last instead reads whichever chain the driver listed last, which on a
+        # two-chain adapter runs several dB below the frame's actual signal and
+        # varies by transmitter, so no constant absorbs it. Per-chain values are
+        # carried alongside rather than discarded.
+        signal_chains = record["signal_dbm"]
+        rssi = float(signal_chains[0]) if signal_chains else -65.0
 
         # ---------------------------
         # Hex Header Traversal
@@ -333,7 +325,7 @@ if __name__ == '__main__':
         
         # Saving timestamp, v_matrix, AND rssi together
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi))
+        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi, signal_chains))
         # Merge the absolute timestamp with the raw angles for logging
         buckets_angles[bucket_key].append((timestamp, angle))
 
