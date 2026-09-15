@@ -116,8 +116,16 @@ if __name__ == '__main__':
         # two-chain adapter runs several dB below the frame's actual signal and
         # varies by transmitter, so no constant absorbs it. Per-chain values are
         # carried alongside rather than discarded.
+        #
+        # A header with no signal field yields None rather than a stand-in figure.
+        # Ranging reads this value as measured received power, so a stand-in is
+        # indistinguishable downstream from a real reading and shifts every
+        # distance derived from it. None reaches the consumers as NaN and carries
+        # through their arithmetic, which reports the gap instead of hiding it.
+        # The V-matrix is unaffected by a missing signal field, so the packet is
+        # still recorded.
         signal_chains = record["signal_dbm"]
-        rssi = float(signal_chains[0]) if signal_chains else -65.0
+        rssi = float(signal_chains[0]) if signal_chains else None
 
         # ---------------------------
         # Hex Header Traversal
