@@ -122,7 +122,7 @@ if __name__ == '__main__':
         Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
-        # Nc/Nr, channel width, codebook and SNR come from the MIMO Control field.
+        # Nc/Nr, channel width and codebook come from the MIMO Control field.
         # pkt_config selects the Givens codebook in vmatrices() and the channel
         # width sets the subcarrier count, so a wrong value corrupts the
         # V-matrices rather than only mislabelling the bucket; both are read per
@@ -164,10 +164,22 @@ if __name__ == '__main__':
             buckets_v_matrices[bucket_key] = []
             buckets_angles[bucket_key] = []
 
+        # Average SNR of each space-time stream, one signed byte per stream at
+        # the head of the Compressed Beamforming Report. This is the reporting
+        # station's own measurement of the link it received the sounding on,
+        # a different quantity from the monitor's radiotap signal above, and
+        # the only figure in the frame describing the beamformer-to-beamformee
+        # path. dB = 22 + 0.25 * value, over -10 to 53.75 dB.
         if standard == "AX":
             packet_snr = packet_raw[(i + 62):(i + 62 + 2*(nc_idx + 1))]
         if standard == "AC":
             packet_snr = packet_raw[(i + 58):(i + 58 + 2*(nc_idx + 1))]
+
+        stream_snr = []
+        for b in range(0, len(packet_snr) - 1, 2):
+            value = hex2dec(packet_snr[b:b + 2])
+            stream_snr.append(22 + 0.25 * (value - 256 if value > 127 else value))
+        stream_snr = tuple(stream_snr)
 
         # Givens angle quantisation, from the Codebook Information subfield. The
         # SU and MU pairs are the same in VHT and HE: SU gives (psi, phi) of
@@ -294,9 +306,8 @@ if __name__ == '__main__':
         # Reconstruct the  V-Matrix
         v_matrix = vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config)
         
-        # Saving timestamp, v_matrix, AND rssi together
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi))
+        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi, stream_snr))
         # Merge the absolute timestamp with the raw angles for logging
         buckets_angles[bucket_key].append((timestamp, angle))
 
