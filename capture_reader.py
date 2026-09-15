@@ -1,19 +1,16 @@
 """
 Module: capture_reader.py
-Read 802.11 frames straight out of a capture file: pcap or pcapng, classic or
-nanosecond, either byte order.
+Read 802.11 frames from a capture file: pcap or pcapng, either byte order and
+either timestamp resolution.
 
-Replaces a pyshark/tshark subprocess in the extraction path. Everything the
-extractor needs -- timestamp, addresses, per-chain signal and the frame bytes --
-sits at a fixed offset in the radiotap header or the 802.11 header, so dissecting
-the frame to reach it costs a subprocess and a full dissector table per chunk and
-returns nothing the bytes do not already carry.
+Everything the extractor needs -- timestamp, addresses, signal and the frame
+bytes -- sits at a fixed offset in the radiotap or 802.11 header, so the frames
+are read directly rather than through a dissector.
 
-Frame selection is by Action Category rather than by frame subtype: beamforming
-reports are sent as Action or Action No Ack depending on the device, and matching
-on the subtype misses whichever one is not listed. Category 0x15 is VHT and 0x1e
-is HE, so the standard is a property of the frame rather than a run-wide setting
-and a capture holding both decodes in one pass.
+Frames are selected by Action Category. Beamforming reports are sent as Action
+or Action No Ack depending on the device, so a subtype match misses whichever is
+not listed. Category 0x15 is VHT and 0x1e is HE, which makes the standard a
+property of the frame rather than a run-wide setting.
 """
 import struct
 
@@ -70,10 +67,9 @@ def radiotap_signal_dbm(buf):
     """
     Every dBm Antenna Signal value in the header, in the order stored.
 
-    A capture from a multi-chain adapter repeats the field once per chain inside
-    successive radiotap namespaces, so this returns a list. The first entry is
-    the chain-agnostic value where one is present; the rest are per-chain.
-    Returns an empty list when the header carries no signal field.
+    A multi-chain adapter repeats the field once per chain in successive
+    radiotap namespaces; the first entry is the chain-agnostic value where one
+    is present. Empty when the header carries no signal field.
     """
     if len(buf) < 8:
         return []
@@ -199,9 +195,9 @@ def beamforming_reports(path, feedback_type=None):
     """
     Yield one dict per compressed beamforming report in the capture.
 
-    feedback_type selects "SU" or "MU" and is compared against the Feedback Type
-    subfield of MIMO Control; None yields both. The caller decodes the rest of
-    MIMO Control, so only the one subfield is read here.
+    feedback_type selects "SU" or "MU" against the Feedback Type subfield of
+    MIMO Control; None yields both. Only that subfield is read here, the caller
+    decodes the rest.
     """
     wanted = {"SU": 0, "MU": 1}.get(feedback_type) if feedback_type else None
     for timestamp, buf in _records(path):
