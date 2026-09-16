@@ -56,20 +56,102 @@ Additional changes, each against a case observed on real captures:
 V-matrices are bit-identical to upstream across 11ac SU, 11ac MU and 11ax SU at
 20, 40, 80 and 160 MHz.
 
-## Install
+## Install and capture setup
 
-```
+### Requirements
+
+The extraction pipeline depends on two third-party packages. Everything else it
+uses is Python standard library.
+
+| file | third-party dependency |
+|---|---|
+| `capture_reader.py` | none (`struct` only) |
+| `utils.py`, `bfi_angles.py`, `vmatrices.py` | numpy |
+| `main.py` | numpy |
+| `3_visualize.py` | numpy, matplotlib |
+
+The conda environment in `wi-bfi.yml` additionally pulls in pyshark, PyQt5,
+PyQt6, PySimpleGUI, nest-asyncio, lxml and cairocffi. Those are required by
+upstream's `main_live_plot.py` and `main_extract_batch.py`, which still import
+pyshark. None of them is on the path this fork uses, so conda is optional.
+
+### Install
+
+Clone:
+
+```bash
 git clone https://github.com/raunakb47/Wi-BFI.git
 cd Wi-BFI
+```
+
+Python packages:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install numpy matplotlib
+```
+
+System packages. `tcpdump` is the only one required; the rest help with putting
+the card into monitor mode and with cross-checking a decode:
+
+```bash
+sudo apt-get install tcpdump iw
+sudo apt-get install tshark aircrack-ng   # optional
+```
+
+Only if upstream's live-plot tooling is wanted:
+
+```bash
 conda env create -f wi-bfi.yml
 ```
 
-`tshark`, `wireshark` and `aircrack-ng` are useful for capturing and for
-cross-checking a decode, but the extractor does not require them:
+#### Monitor mode NIC
 
+Find the interface after plugging it in:
+
+```bash
+iw dev
 ```
-sudo apt-get install tshark wireshark aircrack-ng
+
+USB adapters often appear under a MAC-derived name such as `wlx00c0ca123456`
+rather than `wlan0`. Use `iw dev` report; substitute it for `wlan0`
+below and in `1_capture.sh`.
+
+Stop interfering processes (Optional):
+
+```bash
+sudo airmon-ng check kill
 ```
+
+Switch to monitor mode:
+
+```bash
+sudo ip link set wlan0 down
+sudo iw dev wlan0 set type monitor
+sudo ip link set wlan0 up
+iw dev wlan0 info                            # should report: type monitor
+```
+
+#### Setting the channel and width
+
+Scan for channels:
+
+```bash
+sudo airodump-ng wlan0 --band a
+sudo iw dev wlan0 scan | grep -E "SSID|freq|primary channel|secondary channel" # OR
+```
+
+Set channel number and frequency(WiFi 5 and 6):
+```bash
+sudo iw dev wlan0 set channel 000 20/40/80/160MHz
+```
+
+#### Making it persist across reboots
+Monitor mode does not survive a reboot, and NetworkManager will revert the interface to managed mode. To persist monitor mode:
+
+- A udev rule matching the adapter's MAC to pin a stable interface name; USB adapters otherwise appear under a MAC-derived name that can change. See man udev, NAME= for network devices.
+- An unmanaged-devices entry under /etc/NetworkManager/conf.d/ so NetworkManager leaves the interface alone. See man NetworkManager.conf, keyfile section.
 
 ## Usage
 
@@ -134,6 +216,35 @@ and moves independently of the monitor's reading.
 per-chain values. What the first value means is a property of the driver — on one
 adapter it is the chains summed, on another the strongest chain — so the whole
 list is carried and the distinction can be made downstream.
+
+## Running an analysis
+
+```bash
+cd Wi-BFI
+source .venv/bin/activate
+
+# 1. capture — edit INTERFACE and DURATION at the top of the script first
+./1_capture.sh
+
+# 2. extract and report the buckets found
+./2_batch_extract.sh
+
+# 3. one figure per bucket
+python3 3_visualize.py
+```
+
+Captures stored in `../bfi-workspace/captures/`, results in
+`../bfi-workspace/analysis/<session>/{SU,MU}/`.
+
+`2_batch_extract.sh` takes an optional path to process a specific capture; Default -> latest capture; supports optional parameter `MAX_PACKETS`:
+
+```bash
+MAX_PACKETS=500 ./2_batch_extract.sh path/to/trace.pcapng
+```
+
+A successful run prints one block per bucket with its frame count, array shape,
+duration, RSSI range and SNR range, each marked `ok` or `MISMATCH`. `MISMATCH`
+means the decoded metadata and the reconstructed array disagree.
 
 ## Helper scripts
 
