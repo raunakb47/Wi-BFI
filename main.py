@@ -113,8 +113,14 @@ if __name__ == '__main__':
         # header carrying no signal field yields None, which consumers see as NaN:
         # a stand-in value would be read downstream as measured received power.
         # The V-matrix does not depend on this field, so the packet is still kept.
-        signal_chains = record["signal_dbm"]
-        rssi = float(signal_chains[0]) if signal_chains else None
+        #
+        # The whole list is carried alongside because what the first value means
+        # is a property of the driver, not of the standard: on the adapter behind
+        # the bundled 11ac traces it is the stronger chain, on an mt7921au it is
+        # the two chains summed, and the two differ by up to 3 dB in a way that
+        # moves with the chain balance. Only the per-chain values tell them apart.
+        signal_chains = tuple(float(value) for value in record["signal_dbm"])
+        rssi = signal_chains[0] if signal_chains else None
 
         # ---------------------------
         # Hex Header Traversal
@@ -307,7 +313,8 @@ if __name__ == '__main__':
         v_matrix = vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config)
         
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi, stream_snr))
+        buckets_v_matrices[bucket_key].append(
+            (timestamp, v_matrix, rssi, stream_snr, signal_chains))
         # Merge the absolute timestamp with the raw angles for logging
         buckets_angles[bucket_key].append((timestamp, angle))
 
