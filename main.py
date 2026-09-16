@@ -70,8 +70,8 @@ if __name__ == '__main__':
     parser.add_argument('file_name', help='File name to process (PCAP)')
     parser.add_argument('standard', help='Unused; the standard is decoded per packet from the Action Category. Kept for CLI compatibility.')
     parser.add_argument('mimo', help='Network formation: "SU" or "MU"')
-    parser.add_argument('config', help='Fallback antenna config (e.g., 4x4, 4x2, 2x2)')
-    parser.add_argument('bw', help='Bandwidth of the capture (20, 40, 80, 160)')
+    parser.add_argument('config', help='Unused; antenna config is decoded per packet from MIMO Control. Kept for CLI compatibility.')
+    parser.add_argument('bw', help='Unused; channel width is decoded per packet from MIMO Control. Kept for CLI compatibility.')
     parser.add_argument('num_packet_to_process', help='Maximum packets to process')
     parser.add_argument('saved_vmatrices', help='Output numpy file for V-Matrices')
     parser.add_argument('saved_angles', help='Output numpy file for Raw Angles')
@@ -82,8 +82,10 @@ if __name__ == '__main__':
     # Retained so the positional CLI signature stays valid for callers.
     _unused_standard_arg = args.standard
     mimo = args.mimo
-    fallback_config = args.config
-    bw = int(args.bw)
+    # Retained so the positional CLI signature stays valid for callers.
+    _unused_config_arg = args.config
+    # Retained so the positional CLI signature stays valid for callers.
+    _unused_bw_arg = args.bw
     num_packet_to_process = int(args.num_packet_to_process)
     saved_vmatrices = args.saved_vmatrices
     saved_angles = args.saved_angles
@@ -120,40 +122,64 @@ if __name__ == '__main__':
         signal_chains = tuple(float(value) for value in record["signal_dbm"])
         rssi = signal_chains[0] if signal_chains else None
 
-        try:
-            if standard == "AX":
-                nc_idx = int(current_packet.wlan.he_mimo_control_ncidx)
-                nr_idx = int(current_packet.wlan.he_mimo_control_nridx)
-            else:
-                nc_idx = int(current_packet.wlan.vht_mimo_control_ncindex)
-                nr_idx = int(current_packet.wlan.vht_mimo_control_nridx)
-            pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
-        except AttributeError:
-            pkt_config = fallback_config
-
-        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}"
-        
-        if bucket_key not in buckets_v_matrices:
-            buckets_v_matrices[bucket_key] = []
-            buckets_angles[bucket_key] = []
-
         # ---------------------------
         # Hex Header Traversal
         # ---------------------------
         Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
+        # Nc/Nr, channel width and codebook come from the MIMO Control field.
+        # pkt_config selects the Givens codebook in vmatrices() and the channel
+        # width sets the subcarrier count, so a wrong value corrupts the
+        # V-matrices rather than only mislabelling the bucket; both are read per
+        # packet, since one capture may carry several configurations.
+        #
+        # flip_hex reverses byte order, so binary index k holds spec bit
+        # B(width-1-k): Nc Index is B0-B2, Nr B3-B5 and channel width B6-B7, in
+        # both the VHT (3-byte) and HE (5-byte) fields.
         if standard == "AX":
             packet_mimo_control = packet_raw[(i + 52):(i + 62)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
-            codebook_info = packet_mimo_control_binary[30] 
-            packet_snr = packet_raw[(i + 62):(i + 62 + 2*int(pkt_config[-1]))]
+            codebook_info = packet_mimo_control_binary[30]
+            nc_idx = int(packet_mimo_control_binary[37:40], 2)
+            nr_idx = int(packet_mimo_control_binary[34:37], 2)
+            bw_idx = int(packet_mimo_control_binary[32:34], 2)
 
         if standard == "AC":
             packet_mimo_control = packet_raw[(i + 52):(i + 58)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[13]
-            packet_snr = packet_raw[(i + 58):(i + 58 + 2*int(pkt_config[-1]))]
+            nc_idx = int(packet_mimo_control_binary[21:24], 2)
+            nr_idx = int(packet_mimo_control_binary[18:21], 2)
+            bw_idx = int(packet_mimo_control_binary[16:18], 2)
+
+        pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
+
+        pkt_bw = BW_FROM_INDEX[bw_idx]
+        subcarrier_idxs = subcarrier_indices(standard, pkt_bw)
+        if subcarrier_idxs is None:
+            print(f"[!] skipping packet {p}: {pkt_bw} MHz is not defined for {standard}", file=sys.stderr)
+            continue
+
+        # A bucket holds one stack of V-matrices of shape (NSUBC_VALID, Nr, Nc),
+        # so channel width belongs in the key or the stack is ragged. '@' keeps
+        # the key at three '_'-separated fields with "{Nr}x{Nc}" still parseable.
+        bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}@{pkt_bw}"
+
+        if bucket_key not in buckets_v_matrices:
+            buckets_v_matrices[bucket_key] = []
+            buckets_angles[bucket_key] = []
+
+        # Average SNR of each space-time stream, one signed byte per stream at
+        # the head of the Compressed Beamforming Report. This is the reporting
+        # station's own measurement of the link it received the sounding on,
+        # a different quantity from the monitor's radiotap signal above, and
+        # the only figure in the frame describing the beamformer-to-beamformee
+        # path. dB = 22 + 0.25 * value, over -10 to 53.75 dB.
+        if standard == "AX":
+            packet_snr = packet_raw[(i + 62):(i + 62 + 2*(nc_idx + 1))]
+        if standard == "AC":
+            packet_snr = packet_raw[(i + 58):(i + 58 + 2*(nc_idx + 1))]
 
         stream_snr = []
         for b in range(0, len(packet_snr) - 1, 2):
