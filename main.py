@@ -11,7 +11,8 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-import pyshark
+import sys
+
 import numpy as np
 import math
 from textwrap import wrap
@@ -19,14 +20,55 @@ import argparse
 from vmatrices import vmatrices
 from bfi_angles import bfi_angles
 from utils import hex2dec, flip_hex
+from capture_reader import beamforming_reports
 
 # Set the default value for the least significant bit (LSB)
 LSB = True
 
+# Channel Width subfield of the MIMO Control field, B6-B7 in both standards.
+BW_FROM_INDEX = {0: 20, 1: 40, 2: 80, 3: 160}
+
+
+def subcarrier_indices(standard, bw):
+    """
+    Subcarrier indices carrying a compressed beamforming feedback matrix, for one
+    channel width. Returns None for a width the standard does not define.
+
+    The 11ac sets are ungrouped (Ng=1); the 11ax sets step by 4 because HE
+    feedback is always grouped, and Ng=4 is its finest setting.
+    """
+    if standard == "AC":
+        if bw == 80:
+            return np.setdiff1d(np.arange(-122, 123),
+                                np.array([-104, -76, -40, -12, -1, 0, 1, 10, 38, 74, 102]))
+        if bw == 40:
+            return np.setdiff1d(np.arange(-58, 59),
+                                np.array([-54, -26, -12, -1, 0, 1, 10, 24, 52]))
+        if bw == 20:
+            return np.setdiff1d(np.arange(-28, 29), np.array([-21, -8, 0, 6, 21]))
+        return None
+
+    if standard == "AX":
+        if bw == 160:
+            return np.setdiff1d(np.arange(-1012, 1013, 4),
+                                np.array([-512, -8, -4, 0, 4, 8, 512]))
+        if bw == 80:
+            return np.setdiff1d(np.arange(-500, 504, 4), np.array([0]))
+        if bw == 40:
+            return np.setdiff1d(np.arange(-244, 248, 4), np.array([0]))
+        if bw == 20:
+            neg = np.setdiff1d(np.arange(-122, 0, 2), np.arange(-118, -2, 4))
+            pos = np.setdiff1d(np.arange(2, 124, 2), np.arange(6, 122, 4))
+            return np.concatenate((neg, pos))
+        return None
+
+    return None
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="IEEE 802.11 Agnostic BFI Extraction Engine")
     parser.add_argument('file_name', help='File name to process (PCAP)')
-    parser.add_argument('standard', help='Operating standard: "AC" or "AX"')
+    parser.add_argument('standard', help='Unused; the standard is decoded per packet from the Action Category. Kept for CLI compatibility.')
     parser.add_argument('mimo', help='Network formation: "SU" or "MU"')
     parser.add_argument('config', help='Fallback antenna config (e.g., 4x4, 4x2, 2x2)')
     parser.add_argument('bw', help='Bandwidth of the capture (20, 40, 80, 160)')
@@ -37,7 +79,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     file_name = args.file_name
-    standard = args.standard
+    # Retained so the positional CLI signature stays valid for callers.
+    _unused_standard_arg = args.standard
     mimo = args.mimo
     fallback_config = args.config
     bw = int(args.bw)
@@ -45,81 +88,37 @@ if __name__ == '__main__':
     saved_vmatrices = args.saved_vmatrices
     saved_angles = args.saved_angles
 
-    if mimo == "MU" and standard == "AX":
-        print("[!] MU-MIMO is not available for AX yet. Feature pending.")
-    else:
-        print(f"[*] Processing {file_name} (Standard: {standard}, BW: {bw}MHz)")
+    print(f"[*] Processing {file_name} ({mimo} feedback; standard read per packet)")
 
-    # ---------------------------------------------------------
-    # Subcarrier Mapping
-    # ---------------------------------------------------------
-    if standard == "AC":
-        if bw == 80:
-            subcarrier_idxs = np.arange(-122, 123)
-            pilot_n_null = np.array([-104, -76, -40, -12, -1, 0, 1, 10, 38, 74, 102])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 40:
-            subcarrier_idxs = np.arange(-58, 59)
-            pilot_n_null = np.array([-54, -26, -12, -1, 0, 1, 10, 24, 52])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 20:
-            subcarrier_idxs = np.arange(-28, 29)
-            pilot_n_null = np.array([-21, -8, 0, 6, 21])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-
-    if standard == "AX":
-        if bw == 160:
-            subcarrier_idxs = np.arange(-1012, 1013, 4)
-            pilot_n_null = np.array([-512, -8, -4, 0, 4, 8, 512])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 80:
-            subcarrier_idxs = np.arange(-500, 504, 4)
-            pilot_n_null = np.array([0])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 40:
-            subcarrier_idxs = np.arange(-244, 248, 4)
-            pilot_n_null = np.array([0])
-            subcarrier_idxs = np.setdiff1d(subcarrier_idxs, pilot_n_null)
-        elif bw == 20:
-            neg_subcarriers = np.setdiff1d(np.arange(-122, 0, 2), np.arange(-118, -2, 4))
-            pos_subcarriers = np.setdiff1d(np.arange(2, 124, 2), np.arange(6, 122, 4))
-            subcarrier_idxs = np.concatenate((neg_subcarriers, pos_subcarriers))
-
-    if standard == "AX":
-        display_filter = f'wlan.he.mimo.feedback_type=={mimo}'
-    else:
-        display_filter = f'wlan.vht.mimo_control.feedbacktype=={mimo}'
-
-    packets = pyshark.FileCapture(
-        input_file=file_name,
-        display_filter=display_filter,
-        use_json=True,
-        include_raw=True
-    )._packets_from_tshark_sync()
-
+    # capture_reader selects frames by Action Category, which also identifies the
+    # standard, so one capture may hold both VHT and HE feedback and both decode
+    # in the same pass.
     buckets_v_matrices = {}
     buckets_angles = {}
 
-    for p in range(num_packet_to_process):
-        try:
-            current_packet = packets.__next__()
-        except StopIteration:
+    for p, record in enumerate(beamforming_reports(file_name, mimo)):
+        if p >= num_packet_to_process:
             break
-            
-        packet_raw = current_packet.frame_raw.value
 
-        try:
-            mac_addr_ta = current_packet.wlan.ta
-            mac_addr_ra = current_packet.wlan.ra # Receiver address
-            timestamp = float(current_packet.sniff_timestamp) 
-            
-            #  Extract Monitor Card RSSI for Ray-Circle Intersection
-            try:
-                rssi = float(current_packet.wlan_radio.signal_dbm)
-            except AttributeError:
-                rssi = -65.0 
-        except AttributeError:
-            continue 
+        packet_raw = record["raw"]
+        standard = record["standard"]
+        mac_addr_ta = record["transmitter"]
+        mac_addr_ra = record["receiver"]
+        timestamp = record["timestamp"]
+
+        # A multi-chain adapter reports a chain-agnostic signal value first, then
+        # one per chain; the first is the figure for the frame as received. A
+        # header carrying no signal field yields None, which consumers see as NaN:
+        # a stand-in value would be read downstream as measured received power.
+        # The V-matrix does not depend on this field, so the packet is still kept.
+        #
+        # The whole list is carried alongside because what the first value means
+        # is a property of the driver, not of the standard: on the adapter behind
+        # the bundled 11ac traces it is the stronger chain, on an mt7921au it is
+        # the two chains summed, and the two differ by up to 3 dB in a way that
+        # moves with the chain balance. Only the per-chain values tell them apart.
+        signal_chains = tuple(float(value) for value in record["signal_dbm"])
+        rssi = signal_chains[0] if signal_chains else None
 
         try:
             if standard == "AX":
@@ -156,6 +155,15 @@ if __name__ == '__main__':
             codebook_info = packet_mimo_control_binary[13]
             packet_snr = packet_raw[(i + 58):(i + 58 + 2*int(pkt_config[-1]))]
 
+        stream_snr = []
+        for b in range(0, len(packet_snr) - 1, 2):
+            value = hex2dec(packet_snr[b:b + 2])
+            stream_snr.append(22 + 0.25 * (value - 256 if value > 127 else value))
+        stream_snr = tuple(stream_snr)
+
+        # Givens angle quantisation, from the Codebook Information subfield. The
+        # SU and MU pairs are the same in VHT and HE: SU gives (psi, phi) of
+        # (2, 4) or (4, 6), MU gives (5, 7) or (7, 9).
         if mimo == "SU":
             if codebook_info == "1":
                 psi_bit = 4
@@ -242,10 +250,16 @@ if __name__ == '__main__':
         # ----------------------------
         # BFI Payload Extraction
         # ----------------------------
+        # Read to the end of the frame. The payload is prefix-sliced to
+        # tot_bits_users * NSUBC_VALID bits below, so anything trailing the
+        # angles is ignored: an FCS where the adapter appends one, and the MU
+        # Exclusive Beamforming Report's Delta SNR block on an MU report.
+        # Trimming a fixed four bytes instead discards real feedback on the
+        # adapters that append no FCS.
         if standard == "AX":
-            Feedback_angles = packet_raw[(i + 62 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
+            Feedback_angles = packet_raw[(i + 62 + 2*(nc_idx + 1)):]
         if standard == "AC":
-            Feedback_angles = packet_raw[(i + 58 + 2*int(pkt_config[-1])):(len(packet_raw) - 8)]
+            Feedback_angles = packet_raw[(i + 58 + 2*(nc_idx + 1)):]
             
         Feedback_angles_splitted = np.array(wrap(Feedback_angles, 2))
         Feedback_angles_bin = ""
@@ -256,16 +270,25 @@ if __name__ == '__main__':
                 bin_str = bin_str[::-1]
             Feedback_angles_bin += bin_str
 
-        Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:(tot_bits_users * NSUBC_VALID)], tot_bits_users))
+        # A frame carrying fewer angle bits than its configuration calls for is
+        # reported and skipped; unchecked, the short read surfaces as an empty
+        # binary string inside bfi_angles() and ends the run.
+        required_bits = tot_bits_users * NSUBC_VALID
+        if len(Feedback_angles_bin) < required_bits:
+            print(f"[!] skipping packet {p}: {pkt_config} at {pkt_bw} MHz needs {required_bits} "
+                  f"angle bits, frame carries {len(Feedback_angles_bin)}", file=sys.stderr)
+            continue
+
+        Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:required_bits], tot_bits_users))
 
         angle = bfi_angles(Feed_back_angles_bin_chunk, LSB, NSUBC_VALID, order_bits)
 
         # Reconstruct the  V-Matrix
         v_matrix = vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config)
         
-        # Saving timestamp, v_matrix, AND rssi together
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append((timestamp, v_matrix, rssi))
+        buckets_v_matrices[bucket_key].append(
+            (timestamp, v_matrix, rssi, stream_snr, signal_chains))
         # Merge the absolute timestamp with the raw angles for logging
         buckets_angles[bucket_key].append((timestamp, angle))
 

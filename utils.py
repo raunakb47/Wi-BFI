@@ -18,11 +18,8 @@ from textwrap import wrap
 
 
 def hex2dec(hex_value):
-    hex2array = np.array(wrap(hex_value, 2))
-    # hex2array_flipped = np.flip(hex2array)
-    array_joined = "".join(hex2array)
-    decimal_value = int(array_joined, 16)
-    return decimal_value
+    """Interpret a hex string as an integer."""
+    return int(hex_value, 16)
 
 
 def flip_hex(hex_value):
