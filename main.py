@@ -28,14 +28,19 @@ LSB = True
 # Channel Width subfield of the MIMO Control field, B6-B7 in both standards.
 BW_FROM_INDEX = {0: 20, 1: 40, 2: 80, 3: 160}
 
+# Grouping subfield: adjacent subcarriers sharing one reported matrix. Two bits
+# at B8-B9 in VHT, one at B8 in HE. Cross-checks subcarrier_indices(), whose
+# sets assume the Ng reported here.
+NG_FROM_INDEX_VHT = {0: 1, 1: 2, 2: 4, 3: None}
+NG_FROM_INDEX_HE = {0: 4, 1: 16}
+
 
 def subcarrier_indices(standard, bw):
     """
-    Subcarrier indices carrying a compressed beamforming feedback matrix, for one
-    channel width. Returns None for a width the standard does not define.
+    Subcarrier indices carrying a feedback matrix, for one channel width.
+    None for a width the standard does not define.
 
-    The 11ac sets are ungrouped (Ng=1); the 11ax sets step by 4 because HE
-    feedback is always grouped, and Ng=4 is its finest setting.
+    The 11ac sets are ungrouped (Ng=1); 11ax steps by 4, its finest grouping.
     """
     if standard == "AC":
         if bw == 80:
@@ -92,9 +97,8 @@ if __name__ == '__main__':
 
     print(f"[*] Processing {file_name} ({mimo} feedback; standard read per packet)")
 
-    # capture_reader selects frames by Action Category, which also identifies the
-    # standard, so one capture may hold both VHT and HE feedback and both decode
-    # in the same pass.
+    # Frames are selected by Action Category, which also identifies the
+    # standard, so one capture may hold both VHT and HE feedback.
     buckets_v_matrices = {}
     buckets_angles = {}
 
@@ -108,17 +112,13 @@ if __name__ == '__main__':
         mac_addr_ra = record["receiver"]
         timestamp = record["timestamp"]
 
-        # A multi-chain adapter reports a chain-agnostic signal value first, then
-        # one per chain; the first is the figure for the frame as received. A
-        # header carrying no signal field yields None, which consumers see as NaN:
-        # a stand-in value would be read downstream as measured received power.
-        # The V-matrix does not depend on this field, so the packet is still kept.
+        # A multi-chain adapter reports a chain-agnostic value first, then one
+        # per chain. No signal field yields None, never a stand-in, which would
+        # read downstream as measured power. The V-matrix does not depend on it.
         #
-        # The whole list is carried alongside because what the first value means
-        # is a property of the driver, not of the standard: on the adapter behind
-        # the bundled 11ac traces it is the stronger chain, on an mt7921au it is
-        # the two chains summed, and the two differ by up to 3 dB in a way that
-        # moves with the chain balance. Only the per-chain values tell them apart.
+        # The whole list is carried because what the first value means is a
+        # property of the driver, not the standard: summed chains on one
+        # adapter, strongest chain on another, differing by up to 3 dB.
         signal_chains = tuple(float(value) for value in record["signal_dbm"])
         rssi = signal_chains[0] if signal_chains else None
 
@@ -128,19 +128,18 @@ if __name__ == '__main__':
         Header_length_dec = hex2dec(flip_hex(packet_raw[4:8]))
         i = Header_length_dec * 2
 
-        # Nc/Nr, channel width and codebook come from the MIMO Control field.
-        # pkt_config selects the Givens codebook in vmatrices() and the channel
-        # width sets the subcarrier count, so a wrong value corrupts the
-        # V-matrices rather than only mislabelling the bucket; both are read per
-        # packet, since one capture may carry several configurations.
+        # Nc/Nr, width and codebook from MIMO Control. A wrong value corrupts
+        # the V-matrices rather than only mislabelling the bucket, and one
+        # capture may carry several configurations, so all are read per packet.
         #
         # flip_hex reverses byte order, so binary index k holds spec bit
-        # B(width-1-k): Nc Index is B0-B2, Nr B3-B5 and channel width B6-B7, in
-        # both the VHT (3-byte) and HE (5-byte) fields.
+        # B(width-1-k): Nc is B0-B2, Nr B3-B5, width B6-B7, in both the VHT
+        # (3-byte) and HE (5-byte) fields.
         if standard == "AX":
             packet_mimo_control = packet_raw[(i + 52):(i + 62)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[30]
+            grouping_idx = int(packet_mimo_control_binary[31], 2)
             nc_idx = int(packet_mimo_control_binary[37:40], 2)
             nr_idx = int(packet_mimo_control_binary[34:37], 2)
             bw_idx = int(packet_mimo_control_binary[32:34], 2)
@@ -149,6 +148,7 @@ if __name__ == '__main__':
             packet_mimo_control = packet_raw[(i + 52):(i + 58)]
             packet_mimo_control_binary = ''.join(format(int(char, 16), '04b') for char in flip_hex(packet_mimo_control))
             codebook_info = packet_mimo_control_binary[13]
+            grouping_idx = int(packet_mimo_control_binary[14:16], 2)
             nc_idx = int(packet_mimo_control_binary[21:24], 2)
             nr_idx = int(packet_mimo_control_binary[18:21], 2)
             bw_idx = int(packet_mimo_control_binary[16:18], 2)
@@ -161,21 +161,19 @@ if __name__ == '__main__':
             print(f"[!] skipping packet {p}: {pkt_bw} MHz is not defined for {standard}", file=sys.stderr)
             continue
 
-        # A bucket holds one stack of V-matrices of shape (NSUBC_VALID, Nr, Nc),
-        # so channel width belongs in the key or the stack is ragged. '@' keeps
-        # the key at three '_'-separated fields with "{Nr}x{Nc}" still parseable.
+        # A bucket is one stack of shape (NSUBC_VALID, Nr, Nc), so width
+        # belongs in the key or the stack is ragged. '@' keeps three
+        # '_'-separated fields with "{Nr}x{Nc}" parseable.
         bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}@{pkt_bw}"
 
         if bucket_key not in buckets_v_matrices:
             buckets_v_matrices[bucket_key] = []
             buckets_angles[bucket_key] = []
 
-        # Average SNR of each space-time stream, one signed byte per stream at
-        # the head of the Compressed Beamforming Report. This is the reporting
-        # station's own measurement of the link it received the sounding on,
-        # a different quantity from the monitor's radiotap signal above, and
-        # the only figure in the frame describing the beamformer-to-beamformee
-        # path. dB = 22 + 0.25 * value, over -10 to 53.75 dB.
+        # Average SNR per space-time stream, one signed byte each at the head
+        # of the Compressed Beamforming Report: the reporting station's own
+        # measurement of the beamformer-to-beamformee path, distinct from the
+        # monitor's radiotap signal. dB = 22 + 0.25 * value, -10 to 53.75 dB.
         if standard == "AX":
             packet_snr = packet_raw[(i + 62):(i + 62 + 2*(nc_idx + 1))]
         if standard == "AC":
@@ -187,9 +185,9 @@ if __name__ == '__main__':
             stream_snr.append(22 + 0.25 * (value - 256 if value > 127 else value))
         stream_snr = tuple(stream_snr)
 
-        # Givens angle quantisation, from the Codebook Information subfield. The
-        # SU and MU pairs are the same in VHT and HE: SU gives (psi, phi) of
-        # (2, 4) or (4, 6), MU gives (5, 7) or (7, 9).
+        # Givens angle quantisation from the Codebook Information subfield,
+        # identical in VHT and HE: SU (psi, phi) of (2, 4) or (4, 6),
+        # MU (5, 7) or (7, 9).
         if mimo == "SU":
             if codebook_info == "1":
                 psi_bit = 4
@@ -276,12 +274,10 @@ if __name__ == '__main__':
         # ----------------------------
         # BFI Payload Extraction
         # ----------------------------
-        # Read to the end of the frame. The payload is prefix-sliced to
-        # tot_bits_users * NSUBC_VALID bits below, so anything trailing the
-        # angles is ignored: an FCS where the adapter appends one, and the MU
-        # Exclusive Beamforming Report's Delta SNR block on an MU report.
-        # Trimming a fixed four bytes instead discards real feedback on the
-        # adapters that append no FCS.
+        # Read to the end of the frame; the prefix slice below ignores
+        # anything trailing the angles, whether an appended FCS or an MU
+        # report's Delta SNR block. A fixed four-byte trim would discard real
+        # feedback on adapters that append no FCS.
         if standard == "AX":
             Feedback_angles = packet_raw[(i + 62 + 2*(nc_idx + 1)):]
         if standard == "AC":
@@ -296,9 +292,8 @@ if __name__ == '__main__':
                 bin_str = bin_str[::-1]
             Feedback_angles_bin += bin_str
 
-        # A frame carrying fewer angle bits than its configuration calls for is
-        # reported and skipped; unchecked, the short read surfaces as an empty
-        # binary string inside bfi_angles() and ends the run.
+        # A frame with fewer angle bits than its configuration needs is
+        # skipped; unchecked it surfaces as an empty string in bfi_angles().
         required_bits = tot_bits_users * NSUBC_VALID
         if len(Feedback_angles_bin) < required_bits:
             print(f"[!] skipping packet {p}: {pkt_config} at {pkt_bw} MHz needs {required_bits} "
@@ -312,9 +307,36 @@ if __name__ == '__main__':
         # Reconstruct the  V-Matrix
         v_matrix = vmatrices(angle, phi_bit, psi_bit, NSUBC_VALID, Nr, Nc_users, pkt_config)
         
+        # Sixth element: per-packet facts the bucket key cannot carry.
+        #
+        # A mapping rather than further positional elements, so a later field
+        # is a new key and never another arity change. Existing readers index
+        # from the front and stop at index 3, so appending is compatible.
+        #
+        # standard, nr, nc and bw are repeated from the bucket key so a sample
+        # is self-describing without parsing the key.
+        report_meta = {
+            "standard": standard,
+            "feedback": mimo,
+            "nr": nr_idx + 1,
+            "nc": nc_idx + 1,
+            "bw": pkt_bw,
+            "codebook": int(codebook_info),
+            "grouping_idx": grouping_idx,
+            "ng": (NG_FROM_INDEX_HE.get(grouping_idx) if standard == "AX"
+                   else NG_FROM_INDEX_VHT.get(grouping_idx)),
+            "phi_bit": phi_bit,
+            "psi_bit": psi_bit,
+            "nsubc": NSUBC_VALID,
+            # None when radiotap carries no Flags field.
+            "bad_fcs": record["bad_fcs"],
+            # Sets the wavelength every downstream bearing depends on.
+            "freq_mhz": record["freq_mhz"],
+        }
+
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
         buckets_v_matrices[bucket_key].append(
-            (timestamp, v_matrix, rssi, stream_snr, signal_chains))
+            (timestamp, v_matrix, rssi, stream_snr, signal_chains, report_meta))
         # Merge the absolute timestamp with the raw angles for logging
         buckets_angles[bucket_key].append((timestamp, angle))
 
