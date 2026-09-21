@@ -164,11 +164,11 @@ if __name__ == '__main__':
         # A bucket is one stack of shape (NSUBC_VALID, Nr, Nc), so width
         # belongs in the key or the stack is ragged. '@' keeps three
         # '_'-separated fields with "{Nr}x{Nc}" parseable.
+        #
+        # The key is created only where a sample is appended, below. Creating
+        # it here left an empty list behind for every packet skipped after this
+        # point, and a consumer cannot distinguish that from a real bucket.
         bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}@{pkt_bw}"
-
-        if bucket_key not in buckets_v_matrices:
-            buckets_v_matrices[bucket_key] = []
-            buckets_angles[bucket_key] = []
 
         # Average SNR per space-time stream, one signed byte each at the head
         # of the Compressed Beamforming Report: the reporting station's own
@@ -335,10 +335,10 @@ if __name__ == '__main__':
         }
 
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append(
+        buckets_v_matrices.setdefault(bucket_key, []).append(
             (timestamp, v_matrix, rssi, stream_snr, signal_chains, report_meta))
         # Merge the absolute timestamp with the raw angles for logging
-        buckets_angles[bucket_key].append((timestamp, angle))
+        buckets_angles.setdefault(bucket_key, []).append((timestamp, angle))
 
     np.save(saved_vmatrices, buckets_v_matrices)
     np.save(saved_angles, buckets_angles)
