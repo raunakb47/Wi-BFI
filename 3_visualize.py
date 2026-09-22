@@ -8,8 +8,12 @@ Each figure carries the two power observables and the amplitude of the
 beamforming matrix: the monitor's received signal, which describes the
 transmitter-to-monitor path; the reported average SNR per space-time stream,
 which describes the beamformer-to-beamformee path and so moves independently of
-it; and the share of stream 1's power each transmit antenna carries, which is
-the part of V that shifts as the reporting station moves.
+it; and the share of each stream's power every transmit antenna carries, which
+is the part of V that shifts as the reporting station moves.
+
+The share is shown twice: averaged over subcarriers against time, one panel per
+stream, and per subcarrier as one map per (stream, antenna). Figure height and
+panel count follow Nr and Nc.
 """
 import sys
 from pathlib import Path
@@ -96,8 +100,9 @@ def plot_bucket(key, samples, feedback, out_path):
         snr[row, :len(reported)] = reported
 
     # Columns of V are orthonormal, so the squared magnitudes of one column are
-    # the share of that stream's power on each transmit antenna and sum to 1.
-    share = np.abs(v[..., 0]) ** 2                      # (report, subcarrier, Nr)
+    # the share of that stream's power on each transmit antenna and sum to 1
+    # over the antenna axis.
+    share = np.abs(v) ** 2                              # (report, subcarrier, Nr, Nc)
 
     nsubc = v.shape[1]
     ng = samples[0][5]["ng"]
@@ -110,19 +115,27 @@ def plot_bucket(key, samples, feedback, out_path):
                    else subcarrier_indices(standard, int(bw)))
 
     pending_labels = []
-    fig, axes = plt.subplots(4, 1, figsize=(11, 12), facecolor=SURFACE,
-                             gridspec_kw={"height_ratios": [1, 1, 1, 2]})
+    # Three bands, each its own subfigure so every grid inside one is regular:
+    # a shared-width pair of line plots, Nc per-stream panels, then an Nc by Nr
+    # map grid. One gridspec spanning all three would mix column spans and the
+    # layout engine cannot align them.
+    fig = plt.figure(figsize=(13, 5.2 + 2.6 * nc), facecolor=SURFACE,
+                     layout="constrained")
     fig.suptitle(f"{transmitter} → {receiver}   {config} @ {bw} MHz   "
-                 f"{standard or '?'} {feedback}", color=INK, fontsize=13, y=0.97)
-    fig.text(0.5, 0.940, f"{len(samples)} reports over {elapsed[-1]:.1f} s",
-             ha="center", color=INK_MUTED, fontsize=9)
+                 f"{standard or '?'} {feedback}   ·   {len(samples)} reports "
+                 f"over {elapsed[-1]:.1f} s", color=INK, fontsize=13)
+    band_signal, band_share, band_maps = fig.subfigures(
+        3, 1, height_ratios=[2.0, 1.3, 1.9 * nc])
+    for band in (band_signal, band_share, band_maps):
+        band.set_facecolor(SURFACE)
+    grid = band_signal.add_gridspec(2, 1)
 
-    ax = axes[0]
+    ax = band_signal.add_subplot(grid[0, :])
     ax.plot(elapsed, rssi, color=SERIES[0], linewidth=1.5)
     ax.set_title("Monitor received signal", color=INK, fontsize=10, loc="left")
     style(ax, "dBm")
 
-    ax = axes[1]
+    ax = band_signal.add_subplot(grid[1, :])
     ends = []
     for c in range(nc):
         ax.plot(elapsed, snr[:, c], color=SERIES[c], linewidth=1.5, label=f"stream {c + 1}")
@@ -134,41 +147,72 @@ def plot_bucket(key, samples, feedback, out_path):
     style(ax, "dB")
     pending_labels.append((ax, elapsed[-1], ends))
     if nc > 1:
-        ax.legend(loc="best", fontsize=8, frameon=False, labelcolor=INK_MUTED)
+        # Headroom for the legend, as the share panels get from their fixed
+        # 0..1.15 limits; the autoscaled range leaves none.
+        low, high = ax.get_ylim()
+        ax.set_ylim(low, high + 0.32 * (high - low))
+        ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=nc,
+                  labelcolor=INK_MUTED)
 
-    ax = axes[2]
-    per_antenna = share.mean(axis=1)                    # (report, Nr)
-    for r in range(nr):
-        ax.plot(elapsed, per_antenna[:, r], color=SERIES[r], linewidth=1.5,
-                label=f"antenna {r + 1}")
-    ax.set_title("Transmit-antenna power share of stream 1, mean over subcarriers",
-                 color=INK, fontsize=10, loc="left")
-    style(ax, "share of 1", "Seconds since first report")
-    ax.set_ylim(0, 1.15)
-    ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-    pending_labels.append((ax, elapsed[-1],
-                           [(per_antenna[-1, r], f"a{r + 1}") for r in range(nr)]))
-    ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=nr, labelcolor=INK_MUTED)
+    # One panel per stream: a stream's shares sum to 1 across antennas, so
+    # streams are not comparable on one pair of axes.
+    per_antenna = share.mean(axis=1)                    # (report, Nr, Nc)
+    share_grid = band_share.add_gridspec(1, nc)
+    for c in range(nc):
+        ax = band_share.add_subplot(share_grid[0, c])
+        for r in range(nr):
+            ax.plot(elapsed, per_antenna[:, r, c], color=SERIES[r], linewidth=1.5,
+                    label=f"antenna {r + 1}")
+        ax.set_title(f"Antenna power share, stream {c + 1}" if nc > 1 else
+                     "Antenna power share of stream 1, mean over subcarriers",
+                     color=INK, fontsize=10, loc="left")
+        style(ax, "share of 1\nmean over subcarriers" if c == 0 else "",
+              "Seconds since first report")
+        ax.set_ylim(0, 1.15)
+        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+        if c:
+            ax.set_yticklabels([])
+        pending_labels.append((ax, elapsed[-1],
+                               [(per_antenna[-1, r, c], f"a{r + 1}") for r in range(nr)]))
+        if c == 0:
+            ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=nr,
+                      labelcolor=INK_MUTED)
 
-    # Reports are irregularly spaced, so the map is drawn against report index:
-    # spreading one report across a long gap would show feedback that was never
-    # sent. The span above gives the timing.
-    ax = axes[3]
-    mesh = ax.pcolormesh(np.arange(len(samples) + 1),
-                         np.append(subcarriers, subcarriers[-1] + 1),
-                         share[:, :, 0].T, cmap=SEQUENTIAL, vmin=0, vmax=1,
-                         shading="flat", rasterized=True)
-    ax.set_title("Antenna 1 power share of stream 1, per subcarrier",
-                 color=INK, fontsize=10, loc="left")
-    style(ax, "Matrix index" if grouped else "Subcarrier index", "Report index")
-    ax.grid(False)
-    bar = fig.colorbar(mesh, ax=ax, pad=0.015)
+    # Reports are irregularly spaced, so the maps are drawn against report
+    # index: spreading one report across a long gap would show feedback that
+    # was never sent. The span above gives the timing.
+    #
+    # One map per (stream, antenna). A common 0..1 scale makes cells comparable
+    # within a stream, which is where they sum to 1.
+    edges_x = np.arange(len(samples) + 1)
+    edges_y = np.append(subcarriers, subcarriers[-1] + 1)
+    maps = []
+    map_grid = band_maps.add_gridspec(nc, nr)
+    for c in range(nc):
+        for r in range(nr):
+            ax = band_maps.add_subplot(map_grid[c, r])
+            mesh = ax.pcolormesh(edges_x, edges_y, share[:, :, r, c].T,
+                                 cmap=SEQUENTIAL, vmin=0, vmax=1,
+                                 shading="flat", rasterized=True)
+            if c == 0:
+                ax.set_title(f"antenna {r + 1}", color=INK, fontsize=10, loc="left")
+            axis = "Matrix index" if grouped else "Subcarrier index"
+            style(ax, f"stream {c + 1}\n{axis}" if r == 0 else "",
+                  "Report index" if c == nc - 1 else None)
+            if r:
+                ax.set_yticklabels([])
+            ax.grid(False)
+            maps.append(ax)
+
+    bar = band_maps.colorbar(mesh, ax=maps, pad=0.012, fraction=0.02)
     bar.set_label("share of 1", color=INK_MUTED, fontsize=9)
     bar.ax.tick_params(colors=INK_MUTED, labelsize=8, length=3)
     bar.outline.set_visible(False)
 
-    # The end labels are spaced in pixels, so they go on after the layout is fixed.
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    # The end labels are spaced in pixels, so they go on once the layout is
+    # settled; constrained_layout resolves positions on the first draw.
+    fig.canvas.draw()
+    fig.set_layout_engine("none")
     for target, x_last, points in pending_labels:
         label_ends(target, x_last, points)
 
