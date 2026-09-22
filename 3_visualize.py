@@ -20,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-from main import subcarrier_indices
+from main import NATIVE_NG, subcarrier_count, subcarrier_indices
 
 ANALYSIS_ROOT = "../bfi-workspace/analysis"
 
@@ -100,10 +100,14 @@ def plot_bucket(key, samples, feedback, out_path):
     share = np.abs(v[..., 0]) ** 2                      # (report, subcarrier, Nr)
 
     nsubc = v.shape[1]
+    ng = samples[0][5]["ng"]
     standard = next((std for std in ("AC", "AX")
-                     if (idx := subcarrier_indices(std, int(bw))) is not None
-                     and len(idx) == nsubc), None)
-    subcarriers = subcarrier_indices(standard, int(bw)) if standard else np.arange(nsubc)
+                     if subcarrier_count(std, int(bw), ng) == nsubc), None)
+    # Grouped feedback defines no index positions, so the heatmap falls back to
+    # an ordinal axis rather than labelling rows with subcarriers it cannot name.
+    grouped = standard is None or ng != NATIVE_NG[standard]
+    subcarriers = (np.arange(nsubc) if grouped
+                   else subcarrier_indices(standard, int(bw)))
 
     pending_labels = []
     fig, axes = plt.subplots(4, 1, figsize=(11, 12), facecolor=SURFACE,
@@ -156,7 +160,7 @@ def plot_bucket(key, samples, feedback, out_path):
                          shading="flat", rasterized=True)
     ax.set_title("Antenna 1 power share of stream 1, per subcarrier",
                  color=INK, fontsize=10, loc="left")
-    style(ax, "Subcarrier index", "Report index")
+    style(ax, "Matrix index" if grouped else "Subcarrier index", "Report index")
     ax.grid(False)
     bar = fig.colorbar(mesh, ax=ax, pad=0.015)
     bar.set_label("share of 1", color=INK_MUTED, fontsize=9)
