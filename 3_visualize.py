@@ -4,16 +4,19 @@ One figure per bucket from the .npy files 2_batch_extract.sh writes, as a
 preliminary check that the extraction is sound before any geometry is derived
 from it.
 
-Each figure carries the two power observables and the amplitude of the
-beamforming matrix: the monitor's received signal, which describes the
-transmitter-to-monitor path; the reported average SNR per space-time stream,
-which describes the beamformer-to-beamformee path and so moves independently of
-it; and the share of each stream's power every transmit antenna carries, which
-is the part of V that shifts as the reporting station moves.
+Each figure carries the two power observables and both parts of the beamforming
+matrix: the monitor's received signal, which describes the transmitter-to-
+monitor path; the reported average SNR per space-time stream, which describes
+the beamformer-to-beamformee path and so moves independently of it; the share
+of each stream's power every transmit antenna carries, averaged over
+subcarriers against time, one panel per stream; and each antenna's phase
+against the last one, per subcarrier, one map per (stream, antenna).
 
-The share is shown twice: averaged over subcarriers against time, one panel per
-stream, and per subcarrier as one map per (stream, antenna). Figure height and
-panel count follow Nr and Nc.
+Magnitude alone fixes no bearing -- a covariance built from it is real and
+symmetric about broadside -- so the maps are where a geometry check has
+something to read.
+
+Figure height and panel count follow Nr and Nc.
 """
 import sys
 from pathlib import Path
@@ -22,7 +25,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 
 from main import NATIVE_NG, subcarrier_count, subcarrier_indices
 
@@ -35,10 +37,11 @@ GRID = "#dedcd6"
 # Categorical slots in fixed order, one per antenna or stream; a configuration
 # never has more than four of either.
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
-# Single hue, light to dark: the heatmap encodes a magnitude, not a category.
-SEQUENTIAL = LinearSegmentedColormap.from_list("bfi_blue", [
-    "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
-    "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"])
+# Phase is cyclic, so the map must close: -180 and +180 are the same direction
+# and have to render identically. A sequential ramp would split them at opposite
+# ends and a diverging pair would invent a meaningful midpoint. twilight_shifted
+# is perceptually uniform and wraps.
+CYCLIC = "twilight_shifted"
 # One line height at the label font size, the closest two end labels may sit.
 LABEL_LINE_PX = 12.0
 
@@ -104,6 +107,14 @@ def plot_bucket(key, samples, feedback, out_path):
     # over the antenna axis.
     share = np.abs(v) ** 2                              # (report, subcarrier, Nr, Nc)
 
+    # Phase against the last antenna, per stream. The standard's gauge is one
+    # scalar per column, so a column's absolute phase is an artefact of it and
+    # only differences within a column survive; this is the part a bearing is
+    # read from. The gauge leaves the last row real, so its own column of the
+    # difference is identically zero and is not plotted. Nr is 2 to 4, so at
+    # least one column remains.
+    phase = np.angle(v * np.conj(v[:, :, -1:, :]))      # (report, subcarrier, Nr, Nc)
+
     nsubc = v.shape[1]
     ng = samples[0][5]["ng"]
     standard = next((std for std in ("AC", "AX")
@@ -116,9 +127,9 @@ def plot_bucket(key, samples, feedback, out_path):
 
     pending_labels = []
     # Three bands, each its own subfigure so every grid inside one is regular:
-    # a shared-width pair of line plots, Nc per-stream panels, then an Nc by Nr
-    # map grid. One gridspec spanning all three would mix column spans and the
-    # layout engine cannot align them.
+    # a shared-width pair of line plots, Nc per-stream panels, then an Nc by
+    # Nr-1 map grid. One gridspec spanning all three would mix column spans and
+    # the layout engine cannot align them.
     fig = plt.figure(figsize=(13, 5.2 + 2.6 * nc), facecolor=SURFACE,
                      layout="constrained")
     fig.suptitle(f"{transmitter} → {receiver}   {config} @ {bw} MHz   "
@@ -182,20 +193,21 @@ def plot_bucket(key, samples, feedback, out_path):
     # index: spreading one report across a long gap would show feedback that
     # was never sent. The span above gives the timing.
     #
-    # One map per (stream, antenna). A common 0..1 scale makes cells comparable
-    # within a stream, which is where they sum to 1.
+    # One map per (stream, antenna), on a common -180..180 scale so a phase is
+    # the same colour wherever it appears.
     edges_x = np.arange(len(samples) + 1)
     edges_y = np.append(subcarriers, subcarriers[-1] + 1)
     maps = []
-    map_grid = band_maps.add_gridspec(nc, nr)
+    map_grid = band_maps.add_gridspec(nc, nr - 1)
     for c in range(nc):
-        for r in range(nr):
+        for r in range(nr - 1):
             ax = band_maps.add_subplot(map_grid[c, r])
-            mesh = ax.pcolormesh(edges_x, edges_y, share[:, :, r, c].T,
-                                 cmap=SEQUENTIAL, vmin=0, vmax=1,
+            mesh = ax.pcolormesh(edges_x, edges_y, phase[:, :, r, c].T,
+                                 cmap=CYCLIC, vmin=-np.pi, vmax=np.pi,
                                  shading="flat", rasterized=True)
             if c == 0:
-                ax.set_title(f"antenna {r + 1}", color=INK, fontsize=10, loc="left")
+                ax.set_title(f"antenna {r + 1} − {nr}", color=INK, fontsize=10,
+                             loc="left")
             axis = "Matrix index" if grouped else "Subcarrier index"
             style(ax, f"stream {c + 1}\n{axis}" if r == 0 else "",
                   "Report index" if c == nc - 1 else None)
@@ -204,8 +216,10 @@ def plot_bucket(key, samples, feedback, out_path):
             ax.grid(False)
             maps.append(ax)
 
-    bar = band_maps.colorbar(mesh, ax=maps, pad=0.012, fraction=0.02)
-    bar.set_label("share of 1", color=INK_MUTED, fontsize=9)
+    bar = band_maps.colorbar(mesh, ax=maps, pad=0.012, fraction=0.02,
+                             ticks=[-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
+    bar.set_label("phase vs antenna %d" % nr, color=INK_MUTED, fontsize=9)
+    bar.ax.set_yticklabels(["−180°", "−90°", "0°", "+90°", "+180°"])
     bar.ax.tick_params(colors=INK_MUTED, labelsize=8, length=3)
     bar.outline.set_visible(False)
 
