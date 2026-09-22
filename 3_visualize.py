@@ -95,6 +95,17 @@ def plot_bucket(key, samples, feedback, out_path):
     elapsed = times[order] - times[order][0]
     v = np.stack([samples[i][1] for i in order])
     rssi = np.array([np.nan if samples[i][2] is None else samples[i][2] for i in order])
+    # Radiotap carries one signal per receive chain. The count is a property of
+    # the monitor card, so it is read from the reports rather than assumed, and
+    # capped at the categorical slots since hues are never cycled. Chain 1 is
+    # the same figure as rssi above; the spread between chains is the monitor's
+    # own spatial observable, the only one here not measured by the beamformee.
+    n_chains = min(max((len(s[4]) for s in samples), default=0), len(SERIES))
+    chains = np.full((len(order), n_chains), np.nan)
+    for row, i in enumerate(order):
+        reported = list(samples[i][4])[:n_chains]
+        chains[row, :len(reported)] = reported
+
     # One SNR per space-time stream, padded where a truncated frame carried fewer
     # than the configuration calls for, so the stack stays rectangular.
     snr = np.full((len(order), nc), np.nan)
@@ -142,9 +153,25 @@ def plot_bucket(key, samples, feedback, out_path):
     grid = band_signal.add_gridspec(2, 1)
 
     ax = band_signal.add_subplot(grid[0, :])
-    ax.plot(elapsed, rssi, color=SERIES[0], linewidth=1.5)
-    ax.set_title("Monitor received signal", color=INK, fontsize=10, loc="left")
+    ends = []
+    if n_chains:
+        for k in range(n_chains):
+            ax.plot(elapsed, chains[:, k], color=SERIES[k], linewidth=1.5,
+                    label=f"chain {k + 1}")
+            end = last_finite(chains[:, k])
+            if end is not None:
+                ends.append((end, f"c{k + 1}"))
+    else:
+        ax.plot(elapsed, rssi, color=SERIES[0], linewidth=1.5)
+    ax.set_title("Monitor received signal" + (", one line per receive chain"
+                 if n_chains > 1 else ""), color=INK, fontsize=10, loc="left")
     style(ax, "dBm")
+    pending_labels.append((ax, elapsed[-1], ends))
+    if n_chains > 1:
+        low, high = ax.get_ylim()
+        ax.set_ylim(low, high + 0.32 * (high - low))
+        ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=n_chains,
+                  labelcolor=INK_MUTED)
 
     ax = band_signal.add_subplot(grid[1, :])
     ends = []
