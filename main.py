@@ -29,10 +29,39 @@ LSB = True
 BW_FROM_INDEX = {0: 20, 1: 40, 2: 80, 3: 160}
 
 # Grouping subfield: adjacent subcarriers sharing one reported matrix. Two bits
-# at B8-B9 in VHT, one at B8 in HE. Cross-checks subcarrier_indices(), whose
-# sets assume the Ng reported here.
+# at B8-B9 in VHT, one at B8 in HE. Sizes the angle payload via
+# subcarrier_count().
 NG_FROM_INDEX_VHT = {0: 1, 1: 2, 2: 4, 3: None}
 NG_FROM_INDEX_HE = {0: 4, 1: 16}
+
+# Ng at which subcarrier_indices() returns the full set for that standard.
+NATIVE_NG = {"AC": 1, "AX": 4}
+# Matrices per frame at coarser grouping, IEEE 802.11-2020 Table 9-90a. Counts
+# only; the grouped index positions are not defined here. Native counts come
+# from subcarrier_indices(). Only ("AC", 40) Ng=2 is capture-verified.
+GROUPED_SUBCARRIERS = {
+    ("AC", 20): {2: 30, 4: 16},
+    ("AC", 40): {2: 58, 4: 30},
+    ("AC", 80): {2: 122, 4: 62},
+    ("AX", 20): {16: 16},
+    ("AX", 40): {16: 32},
+    ("AX", 80): {16: 64},
+    ("AX", 160): {16: 128},
+}
+
+
+def subcarrier_count(standard, bw, ng):
+    """
+    Matrices a frame carries, or None when the combination is undefined.
+
+    Grouped frames report fewer matrices than subcarrier_indices() lists. Only
+    the count is defined here; the grouped index positions are not, so a caller
+    needing frequencies must reject ng other than NATIVE_NG.
+    """
+    if ng == NATIVE_NG.get(standard):
+        indices = subcarrier_indices(standard, bw)
+        return None if indices is None else len(indices)
+    return GROUPED_SUBCARRIERS.get((standard, bw), {}).get(ng)
 
 
 def subcarrier_indices(standard, bw):
@@ -41,6 +70,7 @@ def subcarrier_indices(standard, bw):
     None for a width the standard does not define.
 
     The 11ac sets are ungrouped (Ng=1); 11ax steps by 4, its finest grouping.
+    Positions are defined for those groupings only; see subcarrier_count().
     """
     if standard == "AC":
         if bw == 80:
@@ -101,6 +131,9 @@ if __name__ == '__main__':
     # standard, so one capture may hold both VHT and HE feedback.
     buckets_v_matrices = {}
     buckets_angles = {}
+    # Grouped frames carry no subcarrier positions, so a consumer deriving
+    # frequencies must exclude them. Reported on stderr at the end.
+    grouped_frames = 0
 
     for p, record in enumerate(beamforming_reports(file_name, mimo)):
         if p >= num_packet_to_process:
@@ -156,19 +189,22 @@ if __name__ == '__main__':
         pkt_config = f"{nr_idx + 1}x{nc_idx + 1}"
 
         pkt_bw = BW_FROM_INDEX[bw_idx]
-        subcarrier_idxs = subcarrier_indices(standard, pkt_bw)
-        if subcarrier_idxs is None:
-            print(f"[!] skipping packet {p}: {pkt_bw} MHz is not defined for {standard}", file=sys.stderr)
+        pkt_ng = (NG_FROM_INDEX_HE.get(grouping_idx) if standard == "AX"
+                  else NG_FROM_INDEX_VHT.get(grouping_idx))
+        nsubc = subcarrier_count(standard, pkt_bw, pkt_ng)
+        if nsubc is None:
+            print(f"[!] skipping packet {p}: {pkt_bw} MHz Ng={pkt_ng} is not "
+                  f"defined for {standard}", file=sys.stderr)
             continue
 
         # A bucket is one stack of shape (NSUBC_VALID, Nr, Nc), so width
         # belongs in the key or the stack is ragged. '@' keeps three
         # '_'-separated fields with "{Nr}x{Nc}" parseable.
+        #
+        # The key is created only where a sample is appended, below. Creating
+        # it here left an empty list behind for every packet skipped after this
+        # point, and a consumer cannot distinguish that from a real bucket.
         bucket_key = f"{mac_addr_ta}_{mac_addr_ra}_{pkt_config}@{pkt_bw}"
-
-        if bucket_key not in buckets_v_matrices:
-            buckets_v_matrices[bucket_key] = []
-            buckets_angles[bucket_key] = []
 
         # Average SNR per space-time stream, one signed byte each at the head
         # of the Compressed Beamforming Report: the reporting station's own
@@ -269,7 +305,7 @@ if __name__ == '__main__':
         else:
             continue
 
-        NSUBC_VALID = len(subcarrier_idxs)
+        NSUBC_VALID = nsubc
 
         # ----------------------------
         # BFI Payload Extraction
@@ -296,9 +332,23 @@ if __name__ == '__main__':
         # skipped; unchecked it surfaces as an empty string in bfi_angles().
         required_bits = tot_bits_users * NSUBC_VALID
         if len(Feedback_angles_bin) < required_bits:
-            print(f"[!] skipping packet {p}: {pkt_config} at {pkt_bw} MHz needs {required_bits} "
-                  f"angle bits, frame carries {len(Feedback_angles_bin)}", file=sys.stderr)
+            print(f"[!] skipping packet {p}: {pkt_config} at {pkt_bw} MHz Ng={pkt_ng} "
+                  f"needs {required_bits} angle bits, frame carries "
+                  f"{len(Feedback_angles_bin)}", file=sys.stderr)
             continue
+
+        # A whole unread matrix past required_bits means GROUPED_SUBCARRIERS
+        # undercounts this frame, which would truncate the stack silently.
+        # Native frames carry up to 520 spare bits (appended FCS, MU Delta SNR
+        # block), so the check applies to grouped frames only.
+        if pkt_ng != NATIVE_NG.get(standard):
+            leftover = len(Feedback_angles_bin) - required_bits
+            if leftover >= tot_bits_users:
+                print(f"[!] skipping packet {p}: {pkt_config} at {pkt_bw} MHz Ng={pkt_ng} "
+                      f"sized for {NSUBC_VALID} matrices, frame carries "
+                      f"{leftover // tot_bits_users} more", file=sys.stderr)
+                continue
+            grouped_frames += 1
 
         Feed_back_angles_bin_chunk = np.array(wrap(Feedback_angles_bin[:required_bits], tot_bits_users))
 
@@ -335,11 +385,14 @@ if __name__ == '__main__':
         }
 
         # Merge the absolute timestamp with the Spatial Matrix for VSS-LMS interpolation
-        buckets_v_matrices[bucket_key].append(
+        buckets_v_matrices.setdefault(bucket_key, []).append(
             (timestamp, v_matrix, rssi, stream_snr, signal_chains, report_meta))
         # Merge the absolute timestamp with the raw angles for logging
-        buckets_angles[bucket_key].append((timestamp, angle))
+        buckets_angles.setdefault(bucket_key, []).append((timestamp, angle))
 
     np.save(saved_vmatrices, buckets_v_matrices)
     np.save(saved_angles, buckets_angles)
+    if grouped_frames:
+        print(f"[*] {grouped_frames} grouped frames extracted; their reports carry "
+              f"no subcarrier positions", file=sys.stderr)
     print(f"[*] Extraction complete. Saved to {saved_vmatrices}")

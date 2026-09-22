@@ -46,7 +46,7 @@ from pathlib import Path
 
 import numpy as np
 
-from main import subcarrier_indices
+from main import NATIVE_NG, subcarrier_count
 
 session = Path(sys.argv[1])
 
@@ -76,13 +76,16 @@ for feedback in ("SU", "MU"):
         rssi = np.array([np.nan if s[2] is None else s[2] for s in samples])
         snr = np.array([np.mean(s[3]) if s[3] else np.nan for s in samples])
 
-        widths = {std: subcarrier_indices(std, int(bw)) for std in ("AC", "AX")}
-        standard = next((std for std, idxs in widths.items()
-                         if idxs is not None and len(idxs) == stack.shape[1]), "?")
+        # Matched against the count the report's own Ng defines, so a grouped
+        # bucket is checked against its own size rather than the full set.
+        ng = samples[0][5]["ng"]
+        standard = next((std for std in ("AC", "AX")
+                         if subcarrier_count(std, int(bw), ng) == stack.shape[1]), "?")
         expected = (len(samples), stack.shape[1], nr, nc)
         verdict = "ok" if stack.shape == expected and standard != "?" else "MISMATCH"
+        grouping = "" if standard == "?" or ng == NATIVE_NG[standard] else f"  Ng={ng}"
 
-        print(f"  {transmitter} -> {receiver}  {config} @ {bw} MHz  {standard}")
+        print(f"  {transmitter} -> {receiver}  {config} @ {bw} MHz  {standard}{grouping}")
         print(f"    reports {len(samples):6d} over {span:8.1f} s "
               f"({len(samples) / span if span else float('nan'):.2f}/s)  V{stack.shape} {verdict}")
         print(f"    monitor RSSI {np.nanmin(rssi):6.1f} .. {np.nanmax(rssi):6.1f} dBm "
